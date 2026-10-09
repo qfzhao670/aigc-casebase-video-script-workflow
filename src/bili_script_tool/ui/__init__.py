@@ -1,0 +1,2 @@
+"""Tkinter desktop user interface."""
+

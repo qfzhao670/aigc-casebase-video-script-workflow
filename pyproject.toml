@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bili-script-tool"
+version = "2.0.0"
+description = "Build a Bilibili script case library and generate new scripts with Qwen."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "dashscope>=1.20",
+  "openai-whisper",
+]
+
+[project.gui-scripts]
+bili-script-tool = "bili_script_tool.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
