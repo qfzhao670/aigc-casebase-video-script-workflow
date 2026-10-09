@@ -31,14 +31,12 @@ class ServiceFactory:
         library_path: Path,
         log: Optional[Callable[[str], None]] = None,
         progress: Optional[ProgressCallback] = None,
-        whisper_model: Optional[str] = None,
     ) -> CaseBuildWorkflow:
         return CaseBuildWorkflow(
             repository=CaseRepository(library_path),
             media=MediaService(
                 self.settings,
                 log=log,
-                whisper_model=whisper_model,
             ),
             ai=self._analysis_ai_service(),
             log=log,

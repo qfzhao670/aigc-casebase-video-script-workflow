@@ -7,9 +7,9 @@ import re
 import subprocess
 from typing import Callable, Optional, Sequence
 
-from ..config import Settings, require_executable, subprocess_environment
+from ..config import WHISPER_MODEL, Settings, require_executable, subprocess_environment
 from ..domain import VideoMetadata
-from ..errors import ExternalCommandError
+from ..errors import DataValidationError, ExternalCommandError
 
 
 LogCallback = Callable[[str], None]
@@ -18,6 +18,11 @@ ProgressCallback = Callable[[float], None]
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _PERCENT = re.compile(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*%")
+_BVID = re.compile(r"^BV[0-9A-Za-z]{10}$", re.IGNORECASE)
+_BILIBILI_RISK_ERROR = re.compile(
+    r"(?:blocked|rejected) by server \((352|412)\)",
+    re.IGNORECASE,
+)
 
 
 def _extract_percent(output: str) -> Optional[float]:
@@ -33,11 +38,9 @@ class MediaService:
         self,
         settings: Settings,
         log: Optional[LogCallback] = None,
-        whisper_model: Optional[str] = None,
     ):
         self.settings = settings
         self.log = log or (lambda _message: None)
-        self.whisper_model = whisper_model or settings.whisper_model
 
     def check_dependencies(self) -> None:
         require_executable(
@@ -52,6 +55,66 @@ class MediaService:
             "whisper",
             "请在项目虚拟环境中安装 openai-whisper。",
         )
+
+    def get_user_bvids(
+        self,
+        uid: str,
+        limit: int,
+        cookies_from_browser: Optional[str] = None,
+    ) -> list[str]:
+        """Return up to ``limit`` recent public video IDs from a Bilibili user."""
+        normalized_uid = str(uid).strip()
+        if not normalized_uid.isdigit() or int(normalized_uid) <= 0:
+            raise DataValidationError("B 站 UID 必须是大于 0 的整数。")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise DataValidationError("抓取数量必须是 1–1000 之间的整数。")
+
+        yt_dlp = require_executable("yt-dlp", "请安装 yt-dlp 并加入 PATH。")
+        command = [
+            yt_dlp,
+            "--flat-playlist",
+            "--playlist-end",
+            str(limit),
+            "--print",
+            "%(id)s",
+            f"https://space.bilibili.com/{normalized_uid}/video",
+        ]
+        try:
+            result = self._run(command)
+        except ExternalCommandError as exc:
+            risk_match = _BILIBILI_RISK_ERROR.search(str(exc))
+            if not risk_match or not cookies_from_browser:
+                raise
+            risk_code = risk_match.group(1)
+            self.log(
+                f"UID {normalized_uid} 触发 B 站 {risk_code} 风控，"
+                f"正在使用 {cookies_from_browser} 登录状态重试……"
+            )
+            try:
+                result = self._run(
+                    command[:-1]
+                    + ["--cookies-from-browser", cookies_from_browser, command[-1]]
+                )
+            except ExternalCommandError as retry_exc:
+                raise ExternalCommandError(
+                    f"UID {normalized_uid} 重试后仍被 B 站 {risk_code} 风控拒绝。"
+                    f"请先在 {cookies_from_browser} 中登录 B 站，"
+                    "访问一次该用户空间后稍后重试。"
+                ) from retry_exc
+        bvids = []
+        seen = set()
+        for line in result.stdout.splitlines():
+            bvid = line.strip()
+            if _BVID.fullmatch(bvid) and bvid.upper() not in seen:
+                bvids.append(bvid)
+                seen.add(bvid.upper())
+
+        if not bvids:
+            raise DataValidationError(
+                f"未获取到 UID {normalized_uid} 的公开视频。"
+                "请检查 UID、用户投稿状态或稍后重试。"
+            )
+        return bvids
 
     def get_metadata(self, bvid: str) -> VideoMetadata:
         yt_dlp = require_executable("yt-dlp", "请安装 yt-dlp 并加入 PATH。")
@@ -141,7 +204,7 @@ class MediaService:
                 "--language",
                 "Chinese",
                 "--model",
-                self.whisper_model,
+                WHISPER_MODEL,
                 "--model_dir",
                 str(self.settings.whisper_model_dir),
                 "--verbose",

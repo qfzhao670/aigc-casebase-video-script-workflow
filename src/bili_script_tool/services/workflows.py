@@ -13,6 +13,7 @@ from .media_service import MediaService
 LogCallback = Callable[[str], None]
 StopCallback = Callable[[], bool]
 ProgressCallback = Callable[[str, float, Optional[float]], None]
+BvidsCallback = Callable[[List[str]], None]
 
 
 class CaseBuildWorkflow:
@@ -29,6 +30,96 @@ class CaseBuildWorkflow:
         self.ai = ai
         self.log = log or (lambda _message: None)
         self.progress = progress or (lambda _stage, _overall, _stage_percent: None)
+
+    def run_from_user(
+        self,
+        uid: str,
+        limit: int,
+        should_stop: Optional[StopCallback] = None,
+        on_bvids: Optional[BvidsCallback] = None,
+        cookies_from_browser: Optional[str] = None,
+    ) -> List[str]:
+        """Resolve one user's recent videos, then pass them to the build flow."""
+        return self.run_from_users(
+            [uid],
+            limit,
+            should_stop=should_stop,
+            on_bvids=on_bvids,
+            cookies_from_browser=cookies_from_browser,
+        )
+
+    def run_from_users(
+        self,
+        uids: Iterable[str],
+        limit: int,
+        should_stop: Optional[StopCallback] = None,
+        on_bvids: Optional[BvidsCallback] = None,
+        cookies_from_browser: Optional[str] = None,
+    ) -> List[str]:
+        """Resolve multiple users' videos, merge them, then run the build flow."""
+        stop_requested = should_stop or (lambda: False)
+        normalized_uids = list(
+            dict.fromkeys(str(uid).strip() for uid in uids if str(uid).strip())
+        )
+        if not normalized_uids:
+            raise DataValidationError("请至少输入一个 B 站用户 UID。")
+
+        bvids = []
+        seen_bvids = set()
+        total = len(normalized_uids)
+        for index, uid in enumerate(normalized_uids, start=1):
+            if stop_requested():
+                self.log("任务已停止。")
+                self.progress("任务已停止", 0.0, None)
+                return bvids
+            self.log(
+                f"[{index}/{total}] 正在获取 UID {uid} "
+                f"最近的 {limit} 条公开投稿……"
+            )
+            self.progress(
+                f"[{index}/{total}] 正在获取 UID {uid} 的视频列表……",
+                0.0,
+                (index - 1) / total * 100.0,
+            )
+            try:
+                if cookies_from_browser:
+                    user_bvids = self.media.get_user_bvids(
+                        uid,
+                        limit,
+                        cookies_from_browser=cookies_from_browser,
+                    )
+                else:
+                    user_bvids = self.media.get_user_bvids(uid, limit)
+            except ApplicationError as exc:
+                self.log(f"[{index}/{total}] UID {uid} 获取失败，继续下一个：{exc}")
+                continue
+
+            added = []
+            for bvid in user_bvids:
+                key = bvid.upper()
+                if key not in seen_bvids:
+                    seen_bvids.add(key)
+                    bvids.append(bvid)
+                    added.append(bvid)
+            self.log(
+                f"[{index}/{total}] UID {uid} 获取到 {len(user_bvids)} 个 BV 号，"
+                f"合并后新增 {len(added)} 个。"
+            )
+
+        if not bvids:
+            raise DataValidationError(
+                f"未能从输入的 {total} 个 UID 获取到公开视频。"
+                "请检查 UID、用户投稿状态或稍后重试。"
+            )
+        self.log(f"共获取 {len(bvids)} 个去重后的 BV 号。")
+        if on_bvids:
+            on_bvids(list(bvids))
+        if stop_requested():
+            self.log("任务已停止。")
+            self.progress("任务已停止", 0.0, None)
+            return bvids
+        self.run(bvids, should_stop=stop_requested)
+        return bvids
 
     def run(self, bvids: Iterable[str], should_stop: Optional[StopCallback] = None) -> None:
         stop_requested = should_stop or (lambda: False)

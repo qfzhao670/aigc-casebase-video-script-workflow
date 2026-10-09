@@ -11,25 +11,7 @@ from .errors import ConfigurationError, DependencyError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-WHISPER_MODEL_FILES = {
-    "tiny": "tiny.pt",
-    "base": "base.pt",
-    "small": "small.pt",
-    "medium": "medium.pt",
-    "turbo": "large-v3-turbo.pt",
-    "large-v3": "large-v3.pt",
-}
-
-
-def installed_whisper_models(model_dir: Path) -> list:
-    """Return supported multilingual models already present in the project."""
-    return [
-        model_name
-        for model_name, filename in WHISPER_MODEL_FILES.items()
-        if (model_dir / filename).is_file()
-    ]
-
+WHISPER_MODEL = "large-v3-turbo"
 
 def load_dotenv(path: Path) -> None:
     """Load a small KEY=VALUE environment file without another dependency."""
@@ -83,7 +65,6 @@ class Settings:
     dashscope_api_key: str
     dashscope_analysis_model: str
     dashscope_generation_model: str
-    whisper_model: str
     whisper_model_dir: Path
 
     @classmethod
@@ -111,7 +92,6 @@ class Settings:
                 "DASHSCOPE_GENERATION_MODEL",
                 os.environ.get("DASHSCOPE_MODEL", "qwen3.7-max"),
             ).strip(),
-            whisper_model=os.environ.get("WHISPER_MODEL", "small").strip(),
             whisper_model_dir=whisper_model_dir,
         )
 

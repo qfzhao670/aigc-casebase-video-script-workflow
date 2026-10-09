@@ -1,15 +1,17 @@
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from bili_script_tool.config import WHISPER_MODEL
 from bili_script_tool.domain import CaseAnalysis, CaseRecord, VideoMetadata
-from bili_script_tool.config import installed_whisper_models
-from bili_script_tool.errors import AIServiceError, DataValidationError
+from bili_script_tool.errors import AIServiceError, DataValidationError, ExternalCommandError
 from bili_script_tool.services.ai_service import _parse_json, _prefilter_cases
 from bili_script_tool.services.case_repository import CaseRepository
 from bili_script_tool.services.media_service import MediaService, _extract_percent
@@ -79,24 +81,8 @@ class AIHelpersTests(unittest.TestCase):
 
 
 class MediaProgressTests(unittest.TestCase):
-    def test_lists_only_downloaded_multilingual_models(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            model_dir = Path(temp_dir)
-            (model_dir / "small.pt").touch()
-            (model_dir / "large-v3-turbo.pt").touch()
-            (model_dir / "tiny.en.pt").touch()
-
-            self.assertEqual(
-                installed_whisper_models(model_dir),
-                ["small", "turbo"],
-            )
-
-    def test_media_service_accepts_frontend_model_override(self):
-        class Settings:
-            whisper_model = "turbo"
-
-        service = MediaService(Settings(), whisper_model="small")
-        self.assertEqual(service.whisper_model, "small")
+    def test_uses_large_v3_turbo_model(self):
+        self.assertEqual(WHISPER_MODEL, "large-v3-turbo")
 
     def test_extracts_download_and_whisper_percentages(self):
         self.assertEqual(_extract_percent("[download]  42.3% of 10MiB"), 42.3)
@@ -116,6 +102,76 @@ class MediaProgressTests(unittest.TestCase):
             output.append,
         )
         self.assertEqual(output, ["10%", "50%", "100%"])
+
+    def test_get_user_bvids_uses_recent_flat_playlist(self):
+        service = object.__new__(MediaService)
+        service._run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                stdout="BV1xx411c7mD\nBV1YY411c7Ab\nBV1xx411c7mD\n",
+                stderr="",
+            )
+        )
+
+        with mock.patch(
+            "bili_script_tool.services.media_service.require_executable",
+            return_value="/usr/bin/yt-dlp",
+        ):
+            result = service.get_user_bvids(" 12345 ", 2)
+
+        self.assertEqual(result, ["BV1xx411c7mD", "BV1YY411c7Ab"])
+        command = service._run.call_args.args[0]
+        self.assertIn("--flat-playlist", command)
+        self.assertEqual(command[command.index("--playlist-end") + 1], "2")
+        self.assertEqual(command[-1], "https://space.bilibili.com/12345/video")
+
+    def test_get_user_bvids_validates_uid_and_limit(self):
+        service = object.__new__(MediaService)
+        with self.assertRaises(DataValidationError):
+            service.get_user_bvids("not-a-uid", 10)
+        with self.assertRaises(DataValidationError):
+            service.get_user_bvids("123", 0)
+
+    def test_get_user_bvids_retries_risk_errors_with_browser_cookies(self):
+        errors = {
+            "412": "Request is blocked by server (412)",
+            "352": "Request is rejected by server (352)",
+        }
+        for risk_code, error_message in errors.items():
+            with self.subTest(risk_code=risk_code):
+                service = object.__new__(MediaService)
+                service.log = mock.Mock()
+                service._run = mock.Mock(
+                    side_effect=[
+                        ExternalCommandError(error_message),
+                        subprocess.CompletedProcess(
+                            [],
+                            0,
+                            stdout="BV1Mhp46jEVW\n",
+                            stderr="",
+                        ),
+                    ]
+                )
+
+                with mock.patch(
+                    "bili_script_tool.services.media_service.require_executable",
+                    return_value="/usr/bin/yt-dlp",
+                ):
+                    result = service.get_user_bvids(
+                        "16502953",
+                        1,
+                        cookies_from_browser="chrome",
+                    )
+
+                self.assertEqual(result, ["BV1Mhp46jEVW"])
+                self.assertEqual(service._run.call_count, 2)
+                retry_command = service._run.call_args_list[1].args[0]
+                self.assertEqual(
+                    retry_command[retry_command.index("--cookies-from-browser") + 1],
+                    "chrome",
+                )
+                self.assertIn(risk_code, service.log.call_args.args[0])
 
 
 class CaseBuildProgressTests(unittest.TestCase):
@@ -169,6 +225,103 @@ class CaseBuildProgressTests(unittest.TestCase):
         self.assertAlmostEqual(transcription_halfway[1], 57.5)
         self.assertEqual(updates[-1], ("案例库构建完成", 100.0, 100.0))
         self.assertEqual(repository.record.bvid, "BV1")
+
+    def test_resolves_uid_before_running_existing_flow(self):
+        class Repository:
+            def existing_bvids(self):
+                return set()
+
+            def append(self, record):
+                pass
+
+        class Media:
+            def get_user_bvids(self, uid, limit):
+                self.request = (uid, limit)
+                return ["BV1xx411c7mD"]
+
+            def check_dependencies(self):
+                pass
+
+            def get_metadata(self, bvid):
+                return VideoMetadata("uploader", bvid, "title")
+
+            def download_audio(self, metadata, progress=None):
+                progress(100.0)
+                return Path(f"{metadata.bvid}.wav")
+
+            def transcribe(self, audio_path, progress=None):
+                progress(100.0)
+                return "transcript"
+
+        class AI:
+            def analyze_transcript(self, transcript):
+                return CaseAnalysis("summary", ["keyword"])
+
+        media = Media()
+        resolved = []
+        workflow = CaseBuildWorkflow(Repository(), media, AI())
+        result = workflow.run_from_user("12345", 1, on_bvids=resolved.extend)
+
+        self.assertEqual(media.request, ("12345", 1))
+        self.assertEqual(result, ["BV1xx411c7mD"])
+        self.assertEqual(resolved, ["BV1xx411c7mD"])
+
+    def test_resolves_multiple_uids_and_deduplicates_bvids(self):
+        class Repository:
+            def existing_bvids(self):
+                return set()
+
+            def append(self, record):
+                pass
+
+        class Media:
+            def __init__(self):
+                self.requests = []
+
+            def get_user_bvids(self, uid, limit, cookies_from_browser=None):
+                self.requests.append((uid, limit, cookies_from_browser))
+                return {
+                    "100": ["BV1xx411c7mD", "BV1YY411c7Ab"],
+                    "200": ["BV1YY411c7Ab", "BV1ZZ411c7Cd"],
+                }[uid]
+
+            def check_dependencies(self):
+                pass
+
+            def get_metadata(self, bvid):
+                return VideoMetadata("uploader", bvid, "title")
+
+            def download_audio(self, metadata, progress=None):
+                progress(100.0)
+                return Path(f"{metadata.bvid}.wav")
+
+            def transcribe(self, audio_path, progress=None):
+                progress(100.0)
+                return "transcript"
+
+        class AI:
+            def analyze_transcript(self, transcript):
+                return CaseAnalysis("summary", ["keyword"])
+
+        media = Media()
+        resolved = []
+        workflow = CaseBuildWorkflow(Repository(), media, AI())
+        result = workflow.run_from_users(
+            ["100", "200", "100"],
+            2,
+            on_bvids=resolved.extend,
+            cookies_from_browser="chrome",
+        )
+
+        self.assertEqual(
+            media.requests,
+            [("100", 2, "chrome"), ("200", 2, "chrome")],
+        )
+        self.assertEqual(
+            result,
+            ["BV1xx411c7mD", "BV1YY411c7Ab", "BV1ZZ411c7Cd"],
+        )
+        self.assertEqual(resolved, result)
 
 
 if __name__ == "__main__":
