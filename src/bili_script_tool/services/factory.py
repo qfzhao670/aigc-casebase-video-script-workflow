@@ -7,7 +7,7 @@ from ..config import Settings
 from .ai_service import DashScopeService
 from .case_repository import CaseRepository
 from .media_service import MediaService
-from .workflows import CaseBuildWorkflow, ScriptGenerationWorkflow
+from .workflows import CaseBuildWorkflow, ProgressCallback, ScriptGenerationWorkflow
 
 
 class ServiceFactory:
@@ -30,12 +30,19 @@ class ServiceFactory:
         self,
         library_path: Path,
         log: Optional[Callable[[str], None]] = None,
+        progress: Optional[ProgressCallback] = None,
+        whisper_model: Optional[str] = None,
     ) -> CaseBuildWorkflow:
         return CaseBuildWorkflow(
             repository=CaseRepository(library_path),
-            media=MediaService(self.settings, log=log),
+            media=MediaService(
+                self.settings,
+                log=log,
+                whisper_model=whisper_model,
+            ),
             ai=self._analysis_ai_service(),
             log=log,
+            progress=progress,
         )
 
     def script_generator(self, library_path: Path) -> ScriptGenerationWorkflow:

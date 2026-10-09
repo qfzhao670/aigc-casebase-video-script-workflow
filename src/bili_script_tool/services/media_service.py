@@ -1,7 +1,9 @@
 """Cross-platform video download and speech-to-text operations."""
 
+from collections import deque
 import json
 from pathlib import Path
+import re
 import subprocess
 from typing import Callable, Optional, Sequence
 
@@ -11,12 +13,31 @@ from ..errors import ExternalCommandError
 
 
 LogCallback = Callable[[str], None]
+ProgressCallback = Callable[[float], None]
+
+
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_PERCENT = re.compile(r"(?<!\d)(\d{1,3}(?:\.\d+)?)\s*%")
+
+
+def _extract_percent(output: str) -> Optional[float]:
+    """Extract and clamp the last percentage value from command output."""
+    matches = _PERCENT.findall(_ANSI_ESCAPE.sub("", output))
+    if not matches:
+        return None
+    return max(0.0, min(100.0, float(matches[-1])))
 
 
 class MediaService:
-    def __init__(self, settings: Settings, log: Optional[LogCallback] = None):
+    def __init__(
+        self,
+        settings: Settings,
+        log: Optional[LogCallback] = None,
+        whisper_model: Optional[str] = None,
+    ):
         self.settings = settings
         self.log = log or (lambda _message: None)
+        self.whisper_model = whisper_model or settings.whisper_model
 
     def check_dependencies(self) -> None:
         require_executable(
@@ -55,59 +76,117 @@ class MediaService:
             title=str(value.get("title", "Untitled")).strip() or "Untitled",
         )
 
-    def download_audio(self, metadata: VideoMetadata) -> Path:
+    def download_audio(
+        self,
+        metadata: VideoMetadata,
+        progress: Optional[ProgressCallback] = None,
+    ) -> Path:
         self.settings.audio_dir.mkdir(parents=True, exist_ok=True)
         audio_path = self.settings.audio_dir / f"{metadata.bvid}.wav"
         if audio_path.exists():
             self.log(f"音频已存在，跳过下载：{audio_path.name}")
+            if progress:
+                progress(100.0)
             return audio_path
 
         self.log(f"正在下载音频：{metadata.bvid}")
+        if progress:
+            progress(0.0)
         yt_dlp = require_executable("yt-dlp", "请安装 yt-dlp 并加入 PATH。")
         output_template = str(self.settings.audio_dir / "%(id)s.%(ext)s")
-        self._run(
+        self._run_streaming(
             [
                 yt_dlp,
                 "--no-playlist",
-                "--no-progress",
+                "--newline",
+                "--progress",
+                "--progress-delta",
+                "0.5",
                 "-x",
                 "--audio-format",
                 "wav",
                 "-o",
                 output_template,
                 f"https://www.bilibili.com/video/{metadata.bvid}",
-            ]
+            ],
+            on_output=lambda output: self._handle_download_output(output, progress),
         )
         if not audio_path.exists():
             raise ExternalCommandError(f"下载完成后未找到音频文件：{audio_path}")
+        if progress:
+            progress(100.0)
         return audio_path
 
-    def transcribe(self, audio_path: Path) -> str:
+    def transcribe(
+        self,
+        audio_path: Path,
+        progress: Optional[ProgressCallback] = None,
+    ) -> str:
         self.settings.transcript_dir.mkdir(parents=True, exist_ok=True)
         transcript_path = self.settings.transcript_dir / f"{audio_path.stem}.txt"
         if transcript_path.exists():
             self.log(f"转写已存在，跳过识别：{transcript_path.name}")
+            if progress:
+                progress(100.0)
             return transcript_path.read_text(encoding="utf-8")
 
         self.log(f"正在转写：{audio_path.name}")
+        if progress:
+            progress(0.0)
         whisper = require_executable("whisper", "请安装 openai-whisper 并加入 PATH。")
-        self._run(
+        self._run_streaming(
             [
                 whisper,
                 str(audio_path),
                 "--language",
                 "Chinese",
                 "--model",
-                self.settings.whisper_model,
+                self.whisper_model,
+                "--model_dir",
+                str(self.settings.whisper_model_dir),
+                "--verbose",
+                "False",
                 "--output_format",
                 "txt",
                 "--output_dir",
                 str(self.settings.transcript_dir),
-            ]
+            ],
+            on_output=lambda output: self._handle_transcription_output(output, progress),
         )
         if not transcript_path.exists():
             raise ExternalCommandError(f"转写完成后未找到文本文件：{transcript_path}")
+        if progress:
+            progress(100.0)
         return transcript_path.read_text(encoding="utf-8")
+
+    def _handle_download_output(
+        self,
+        output: str,
+        progress: Optional[ProgressCallback],
+    ) -> None:
+        clean_output = _ANSI_ESCAPE.sub("", output).strip()
+        if not clean_output:
+            return
+        percent = _extract_percent(clean_output)
+        if percent is not None and progress:
+            progress(percent)
+            return
+        if clean_output.startswith(("[download] Destination", "[ExtractAudio]")):
+            self.log(clean_output)
+
+    def _handle_transcription_output(
+        self,
+        output: str,
+        progress: Optional[ProgressCallback],
+    ) -> None:
+        clean_output = _ANSI_ESCAPE.sub("", output).strip()
+        if not clean_output:
+            return
+        percent = _extract_percent(clean_output)
+        if percent is not None and progress:
+            progress(percent)
+        elif not clean_output.startswith("UserWarning:"):
+            self.log(f"Whisper：{clean_output}")
 
     def _run(self, command: Sequence[str]) -> subprocess.CompletedProcess:
         result = subprocess.run(
@@ -122,4 +201,50 @@ class MediaService:
             details = result.stderr.strip() or result.stdout.strip() or "未知错误"
             raise ExternalCommandError(f"外部命令执行失败：{details}")
         return result
+
+    def _run_streaming(
+        self,
+        command: Sequence[str],
+        on_output: Callable[[str], None],
+    ) -> None:
+        """Run a command while forwarding newline/carriage-return progress records."""
+        process = subprocess.Popen(
+            list(command),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=subprocess_environment(),
+        )
+        assert process.stdout is not None
+
+        records = deque(maxlen=20)
+        current = []
+        while True:
+            character = process.stdout.read(1)
+            if character == "" and process.poll() is not None:
+                break
+            if not character:
+                continue
+            if character in "\r\n":
+                record = "".join(current).strip()
+                current.clear()
+                if record:
+                    records.append(record)
+                    on_output(record)
+            else:
+                current.append(character)
+
+        final_record = "".join(current).strip()
+        if final_record:
+            records.append(final_record)
+            on_output(final_record)
+
+        process.stdout.close()
+        return_code = process.wait()
+        if return_code != 0:
+            details = "\n".join(records).strip() or "未知错误"
+            raise ExternalCommandError(f"外部命令执行失败：{details}")
 

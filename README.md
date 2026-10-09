@@ -5,6 +5,10 @@
 1. **案例库构建**：根据 B 站 BV 号下载音频、使用 Whisper 转写、调用通义千问生成摘要和关键词，并写入 JSONL 案例库。
 2. **文案生成**：根据创作需求筛选参考案例，结合人工大纲和自定义要求生成新的视频文案。
 
+案例库构建页会实时显示整体进度、音频下载进度和 Whisper 语音转录进度，
+并在执行日志中保留带时间戳的阶段记录。页面上还可以从项目内已下载的
+Whisper 模型中选择本次转录所使用的模型。
+
 ## 项目结构
 
 ```text
@@ -86,12 +90,13 @@ chmod +x scripts/setup_macos.sh launch_macos.command
 DASHSCOPE_API_KEY=你的通义千问API密钥
 DASHSCOPE_ANALYSIS_MODEL=qwen-max
 DASHSCOPE_GENERATION_MODEL=qwen3.7-max
-WHISPER_MODEL=turbo
+WHISPER_MODEL=small
+WHISPER_MODEL_DIR=models/whisper
 ```
 
 以上配置与重构前保持一致：案例入库的摘要和关键词分析使用 `qwen-max`，案例筛选及
-最终文案生成使用 `qwen3.7-max`。旧代码未显式指定 Whisper 模型，当前恢复为新版
-OpenAI Whisper CLI 的默认 `turbo` 模型。
+最终文案生成使用 `qwen3.7-max`。Whisper 默认使用轻量的 `small` 模型，也可以在
+案例库构建页中临时切换为项目内其他已下载的模型。
 
 启动方式：
 
@@ -129,6 +134,7 @@ python3 -m unittest discover -v
 - `data/dataset.jsonl`：每行一个案例，字段为 `uploader`、`bvid`、`title`、`text`、`summary`、`keywords`。
 - `data/audio/`：运行时生成的 WAV 文件，已被 Git 忽略。
 - `data/transcripts/`：运行时生成的转写文本，已被 Git 忽略。
+- `models/whisper/`：Whisper 模型文件，默认保存在项目内并被 Git 忽略。
 - `examples/outline.txt`：示例大纲，可以在界面中选择任意其他文本文件。
 
 ## 安全说明

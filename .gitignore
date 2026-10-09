@@ -9,4 +9,8 @@ __pycache__/
 # Generated media and transcripts
 data/audio/
 data/transcripts/
+data/
+
+# Local speech-recognition models (large binary files)
+models/
 

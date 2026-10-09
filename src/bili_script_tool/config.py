@@ -12,6 +12,24 @@ from .errors import ConfigurationError, DependencyError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+WHISPER_MODEL_FILES = {
+    "tiny": "tiny.pt",
+    "base": "base.pt",
+    "small": "small.pt",
+    "medium": "medium.pt",
+    "turbo": "large-v3-turbo.pt",
+    "large-v3": "large-v3.pt",
+}
+
+
+def installed_whisper_models(model_dir: Path) -> list:
+    """Return supported multilingual models already present in the project."""
+    return [
+        model_name
+        for model_name, filename in WHISPER_MODEL_FILES.items()
+        if (model_dir / filename).is_file()
+    ]
+
 
 def load_dotenv(path: Path) -> None:
     """Load a small KEY=VALUE environment file without another dependency."""
@@ -66,11 +84,17 @@ class Settings:
     dashscope_analysis_model: str
     dashscope_generation_model: str
     whisper_model: str
+    whisper_model_dir: Path
 
     @classmethod
     def from_environment(cls, project_root: Path = PROJECT_ROOT) -> "Settings":
         load_dotenv(project_root / ".env")
         data_dir = Path(os.environ.get("BILI_SCRIPT_DATA_DIR", project_root / "data"))
+        whisper_model_dir = Path(
+            os.environ.get("WHISPER_MODEL_DIR", project_root / "models" / "whisper")
+        )
+        if not whisper_model_dir.is_absolute():
+            whisper_model_dir = project_root / whisper_model_dir
         return cls(
             project_root=project_root,
             data_dir=data_dir,
@@ -87,12 +111,14 @@ class Settings:
                 "DASHSCOPE_GENERATION_MODEL",
                 os.environ.get("DASHSCOPE_MODEL", "qwen3.7-max"),
             ).strip(),
-            whisper_model=os.environ.get("WHISPER_MODEL", "turbo").strip(),
+            whisper_model=os.environ.get("WHISPER_MODEL", "small").strip(),
+            whisper_model_dir=whisper_model_dir,
         )
 
     def ensure_work_directories(self) -> None:
         self.audio_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
+        self.whisper_model_dir.mkdir(parents=True, exist_ok=True)
 
     def require_api_key(self) -> str:
         if not self.dashscope_api_key:
