@@ -24,7 +24,7 @@
 │   └── outline.txt                # 大纲示例
 ├── scripts/
 │   ├── setup_macos.sh             # macOS 初始化
-│   └── setup_windows.ps1          # Windows Python 环境初始化
+│   └── setup_windows.ps1          # Windows PyCharm 虚拟环境依赖安装
 ├── src/bili_script_tool/
 │   ├── app.py                     # 应用入口
 │   ├── config.py                  # 配置、路径及跨平台命令发现
@@ -114,27 +114,53 @@ WHISPER_MODEL_DIR=models/whisper
 
 ## Windows 安装与启动
 
-本项目在 Windows 上使用独立的 Conda 环境，环境名默认为 `bili-script-tool`，Python 版本为 3.11。
+本项目在 Windows 上使用 **PyCharm 创建的项目虚拟环境 `.venv`**，不再使用 Conda。
+FFmpeg 和 yt-dlp 也不通过 Conda、pip 或安装脚本下载，而是将已准备好的
+Windows 可执行文件手动放到项目根目录。程序会优先使用这些本地文件，
+不需要修改 Windows 的系统 `PATH`。建议使用 64 位 Python 3.11。
 
 ### 1. 安装前准备
 
-1. 安装 [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/) 或 Anaconda。推荐安装体积更小的 Miniconda。
-2. 如果要通过 UID 获取视频，需要安装 Chrome、在 Chrome 中登录 B 站，并建议先访问一次目标用户空间。触发 412/352 风控时，程序会读取该登录 Cookie 重试。
-3. 准备通义千问 API Key。首次使用 Whisper 时还会下载 `large-v3-turbo` 模型，请确保网络正常且磁盘空间充足。
+1. 安装 64 位 Python 3.11 和 PyCharm。
+2. 准备与 Windows 架构匹配的 `ffmpeg.exe`、`ffprobe.exe`、`ffplay.exe`、`yt-dlp.exe`。
+   这些文件由使用者手动复制，项目脚本不会自动下载或替换它们。
+3. 如果要通过 UID 获取视频，需要安装 Chrome、在 Chrome 中登录 B 站，并建议先访问一次目标用户空间。触发 412/352 风控时，程序会读取该登录 Cookie 重试。
+4. 准备通义千问 API Key。Whisper 固定使用 `large-v3-turbo` 模型；如果项目的
+   `models/whisper/large-v3-turbo.pt` 尚未手动准备，Whisper 首次运行时仍需下载模型。
 
-安装 Conda 后，请使用“Anaconda Prompt”或已初始化 Conda 的 PowerShell。如果 PowerShell 无法执行 `conda activate`，先运行 `conda init powershell`，然后关闭并重新打开 PowerShell。
+### 2. 放置 Windows 工具
 
-### 2. 进入项目目录
+将四个 `.exe` 直接放在项目根目录，和 `run.py` 处在同一层：
 
-把下面的路径替换为项目在本机的实际路径：
-
-```powershell
-Set-Location "D:\path\to\案例库构建v1.0"
+```text
+案例库构建v1.0\
+├── ffmpeg.exe
+├── ffprobe.exe
+├── ffplay.exe
+├── yt-dlp.exe
+├── run.py
+├── requirements.txt
+└── ...
 ```
 
-### 3. 自动安装
+这四个文件不需要复制到 `System32`，也不需要添加到系统环境变量。
 
-在 PowerShell 中运行：
+### 3. 在 PyCharm 中创建虚拟环境
+
+1. 用 PyCharm 打开项目根目录。
+2. 打开 **File > Settings > Project > Python Interpreter**。
+3. 选择 **Add Interpreter > Add Local Interpreter > Virtualenv Environment > New**。
+4. `Location` 设为项目下的 `.venv`，`Base interpreter` 选择 Python 3.11，然后确认创建。
+
+创建后应存在：
+
+```text
+案例库构建v1.0\.venv\Scripts\python.exe
+```
+
+### 4. 安装 Python 依赖
+
+打开 PyCharm 底部的 **Terminal**，确认当前位置是项目根目录，然后运行：
 
 ```powershell
 .\scripts\setup_windows.ps1
@@ -142,9 +168,9 @@ Set-Location "D:\path\to\案例库构建v1.0"
 
 该脚本会：
 
-- 创建 Python 3.11 Conda 环境 `bili-script-tool`；
-- 通过 `conda-forge` 安装 FFmpeg；
-- 安装 `requirements.txt` 中的 Python 依赖以及 `yt-dlp`；
+- 检查 PyCharm 创建的 `.venv\Scripts\python.exe`；
+- 检查项目根目录中的四个 `.exe`，但不下载它们；
+- 仅将 `requirements.txt` 中的 Python 包安装到该 `.venv`；
 - 当 `.env` 不存在时，从 `.env.example` 复制生成。
 
 如果 PowerShell 禁止运行本地脚本，可仅在当前窗口临时放开限制后重试：
@@ -154,18 +180,11 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\setup_windows.ps1
 ```
 
-### 4. 手动安装（可选）
-
-如果不使用自动脚本，可以依次运行：
+Python 依赖必须通过 pip 安装；已安装齐全时可跳过该脚本。如果不使用脚本，
+也可在 PyCharm Terminal 中手动运行：
 
 ```powershell
-conda create --name bili-script-tool python=3.11 -y
-conda activate bili-script-tool
-conda install --channel conda-forge ffmpeg -y
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install --upgrade "yt-dlp[default]"
-
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
@@ -182,34 +201,38 @@ WHISPER_MODEL_DIR=models/whisper
 
 ### 6. 检查环境
 
-每次启动前先激活 Conda 环境，然后检查 Python 和外部命令：
+在 PyCharm Terminal 中检查项目解释器和本地工具：
 
 ```powershell
-conda activate bili-script-tool
-python --version
-python -c "import tkinter, dashscope, whisper; print('Tk', tkinter.TkVersion)"
-ffmpeg -version
-yt-dlp --version
+.\.venv\Scripts\python.exe --version
+.\.venv\Scripts\python.exe -c "import tkinter, dashscope, whisper; print('Tk', tkinter.TkVersion)"
+.\ffmpeg.exe -version
+.\ffprobe.exe -version
+.\ffplay.exe -version
+.\yt-dlp.exe --version
 ```
 
-如果提示找不到 `ffmpeg` 或 `yt-dlp`，请先确认命令行左侧显示 `(bili-script-tool)`，表示当前 Conda 环境已激活。
+如果某个 `.exe` 无法运行，请确认文件名没有被 Windows 隐藏扩展名后变成
+`ffmpeg.exe.exe`，并确认它与当前 Windows 架构匹配。
 
 ### 7. 启动程序
 
-首次运行建议保留终端窗口，方便查看报错：
+在 PyCharm 中右键单击 `run.py`，选择 **Run 'run'**。请确认运行配置使用项目的
+`.venv` 解释器，`Working directory` 为项目根目录。
+
+也可在 PyCharm Terminal 中启动：
 
 ```powershell
-conda activate bili-script-tool
-python run.py
+.\.venv\Scripts\python.exe run.py
 ```
 
-如果不希望显示终端窗口，可以在环境激活后使用：
+如果不希望显示终端窗口，可使用：
 
 ```powershell
-pythonw run.py
+.\.venv\Scripts\pythonw.exe run.py
 ```
 
-项目不会提交 FFmpeg 或 yt-dlp 的第三方 `.exe` 文件；它们由 Conda 环境和 pip 管理，避免仓库内包含来源不明或过期的可执行文件。
+以上 `.exe` 是本机手动放置的运行工具，已在 `.gitignore` 中排除，不会被 Git 误提交。
 
 ## 开发与验证
 
