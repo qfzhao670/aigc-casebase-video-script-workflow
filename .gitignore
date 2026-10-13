@@ -6,12 +6,6 @@ __pycache__/
 *.egg-info/
 .env
 
-# Windows tools are placed beside run.py manually; do not commit large binaries.
-/ffmpeg.exe
-/ffprobe.exe
-/ffplay.exe
-/yt-dlp.exe
-
 # Generated media and transcripts
 data/audio/
 data/transcripts/

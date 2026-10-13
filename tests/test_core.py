@@ -9,7 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bili_script_tool.config import WHISPER_MODEL, find_executable, subprocess_environment
+from bili_script_tool.config import WHISPER_MODEL
 from bili_script_tool.domain import CaseAnalysis, CaseRecord, VideoMetadata
 from bili_script_tool.errors import AIServiceError, DataValidationError, ExternalCommandError
 from bili_script_tool.services.ai_service import _parse_json, _prefilter_cases
@@ -89,27 +89,6 @@ class MediaProgressTests(unittest.TestCase):
         self.assertEqual(_extract_percent(" 67%|###### | 123/456 frames"), 67.0)
         self.assertEqual(_extract_percent("\x1b[32m100%\x1b[0m"), 100.0)
         self.assertIsNone(_extract_percent("loading model"))
-
-    def test_windows_executable_discovery_prefers_project_root(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir)
-            local_executable = project_root / "yt-dlp.exe"
-            local_executable.touch()
-
-            with mock.patch("bili_script_tool.config.sys.platform", "win32"):
-                resolved = find_executable("yt-dlp", project_root=project_root)
-
-            self.assertEqual(resolved, str(local_executable.resolve()))
-
-    def test_subprocess_path_starts_with_project_root(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project_root = Path(temp_dir)
-            environment = subprocess_environment(project_root)
-
-            self.assertEqual(
-                environment["PATH"].split(__import__("os").pathsep)[0],
-                str(project_root.resolve()),
-            )
 
     def test_streaming_runner_splits_carriage_return_progress(self):
         service = object.__new__(MediaService)

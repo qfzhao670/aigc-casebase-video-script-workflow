@@ -13,7 +13,6 @@ from .errors import ConfigurationError, DependencyError
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WHISPER_MODEL = "large-v3-turbo"
 
-
 def load_dotenv(path: Path) -> None:
     """Load a small KEY=VALUE environment file without another dependency."""
     if not path.exists():
@@ -30,17 +29,11 @@ def load_dotenv(path: Path) -> None:
             os.environ.setdefault(key, value)
 
 
-def subprocess_environment(project_root: Path = PROJECT_ROOT) -> Dict[str, str]:
-    """Return an environment containing the project and virtualenv tools.
-
-    Windows distributions keep FFmpeg and yt-dlp beside ``run.py``.  Putting the
-    project root first also lets child processes (notably yt-dlp and Whisper)
-    discover those executables without changing the user's system ``PATH``.
-    """
+def subprocess_environment() -> Dict[str, str]:
+    """Return an environment that also works when launched from macOS Finder."""
     env = os.environ.copy()
     current_path = env.get("PATH", "")
     preferred = [
-        str(project_root.resolve()),
         str(Path(sys.executable).resolve().parent),
         "/opt/homebrew/bin",
         "/usr/local/bin",
@@ -50,27 +43,12 @@ def subprocess_environment(project_root: Path = PROJECT_ROOT) -> Dict[str, str]:
     return env
 
 
-def find_executable(name: str, project_root: Path = PROJECT_ROOT) -> Optional[str]:
-    """Find an executable, preferring a Windows binary in the project root."""
-    root = project_root.resolve()
-    local_names = [name]
-    if sys.platform == "win32" and not name.lower().endswith(".exe"):
-        local_names.insert(0, f"{name}.exe")
-
-    for local_name in local_names:
-        candidate = root / local_name
-        if candidate.is_file():
-            return str(candidate)
-
-    return shutil.which(name, path=subprocess_environment(root)["PATH"])
+def find_executable(name: str) -> Optional[str]:
+    return shutil.which(name, path=subprocess_environment()["PATH"])
 
 
-def require_executable(
-    name: str,
-    install_hint: str,
-    project_root: Path = PROJECT_ROOT,
-) -> str:
-    executable = find_executable(name, project_root=project_root)
+def require_executable(name: str, install_hint: str) -> str:
+    executable = find_executable(name)
     if executable:
         return executable
     raise DependencyError(f"未找到 {name}。{install_hint}")

@@ -7,13 +7,7 @@ import re
 import subprocess
 from typing import Callable, Optional, Sequence
 
-from ..config import (
-    PROJECT_ROOT,
-    WHISPER_MODEL,
-    Settings,
-    require_executable,
-    subprocess_environment,
-)
+from ..config import WHISPER_MODEL, Settings, require_executable, subprocess_environment
 from ..domain import VideoMetadata
 from ..errors import DataValidationError, ExternalCommandError
 
@@ -51,38 +45,16 @@ class MediaService:
     def check_dependencies(self) -> None:
         require_executable(
             "yt-dlp",
-            "macOS 请运行 scripts/setup_macos.sh；Windows 请将 yt-dlp.exe 放到项目根目录。",
-            project_root=self.settings.project_root,
+            "macOS 请运行 scripts/setup_macos.sh，Windows 请安装 yt-dlp 并加入 PATH。",
         )
         require_executable(
             "ffmpeg",
-            "macOS 请运行 scripts/setup_macos.sh；Windows 请将 ffmpeg.exe 放到项目根目录。",
-            project_root=self.settings.project_root,
-        )
-        require_executable(
-            "ffprobe",
-            "macOS 请运行 scripts/setup_macos.sh；Windows 请将 ffprobe.exe 放到项目根目录。",
-            project_root=self.settings.project_root,
+            "macOS 请运行 scripts/setup_macos.sh，Windows 请安装 FFmpeg 并加入 PATH。",
         )
         require_executable(
             "whisper",
-            "请在项目的 PyCharm 虚拟环境中安装 openai-whisper。",
-            project_root=self.settings.project_root,
+            "请在项目虚拟环境中安装 openai-whisper。",
         )
-
-    def _require_executable(self, name: str, install_hint: str) -> str:
-        settings = getattr(self, "settings", None)
-        project_root = settings.project_root if settings is not None else PROJECT_ROOT
-        return require_executable(
-            name,
-            install_hint,
-            project_root=project_root,
-        )
-
-    def _subprocess_environment(self) -> dict[str, str]:
-        settings = getattr(self, "settings", None)
-        project_root = settings.project_root if settings is not None else PROJECT_ROOT
-        return subprocess_environment(project_root)
 
     def get_user_bvids(
         self,
@@ -97,10 +69,7 @@ class MediaService:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise DataValidationError("抓取数量必须是 1–1000 之间的整数。")
 
-        yt_dlp = self._require_executable(
-            "yt-dlp",
-            "Windows 请将 yt-dlp.exe 放到项目根目录。",
-        )
+        yt_dlp = require_executable("yt-dlp", "请安装 yt-dlp 并加入 PATH。")
         command = [
             yt_dlp,
             "--flat-playlist",
@@ -148,10 +117,7 @@ class MediaService:
         return bvids
 
     def get_metadata(self, bvid: str) -> VideoMetadata:
-        yt_dlp = self._require_executable(
-            "yt-dlp",
-            "Windows 请将 yt-dlp.exe 放到项目根目录。",
-        )
+        yt_dlp = require_executable("yt-dlp", "请安装 yt-dlp 并加入 PATH。")
         result = self._run(
             [
                 yt_dlp,
@@ -189,20 +155,11 @@ class MediaService:
         self.log(f"正在下载音频：{metadata.bvid}")
         if progress:
             progress(0.0)
-        yt_dlp = self._require_executable(
-            "yt-dlp",
-            "Windows 请将 yt-dlp.exe 放到项目根目录。",
-        )
-        ffmpeg = self._require_executable(
-            "ffmpeg",
-            "Windows 请将 ffmpeg.exe 放到项目根目录。",
-        )
+        yt_dlp = require_executable("yt-dlp", "请安装 yt-dlp 并加入 PATH。")
         output_template = str(self.settings.audio_dir / "%(id)s.%(ext)s")
         self._run_streaming(
             [
                 yt_dlp,
-                "--ffmpeg-location",
-                str(Path(ffmpeg).parent),
                 "--no-playlist",
                 "--newline",
                 "--progress",
@@ -239,10 +196,7 @@ class MediaService:
         self.log(f"正在转写：{audio_path.name}")
         if progress:
             progress(0.0)
-        whisper = self._require_executable(
-            "whisper",
-            "请在项目的 PyCharm 虚拟环境中安装 openai-whisper。",
-        )
+        whisper = require_executable("whisper", "请安装 openai-whisper 并加入 PATH。")
         self._run_streaming(
             [
                 whisper,
@@ -304,7 +258,7 @@ class MediaService:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=self._subprocess_environment(),
+            env=subprocess_environment(),
         )
         if result.returncode != 0:
             details = result.stderr.strip() or result.stdout.strip() or "未知错误"
@@ -325,7 +279,7 @@ class MediaService:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            env=self._subprocess_environment(),
+            env=subprocess_environment(),
         )
         assert process.stdout is not None
 

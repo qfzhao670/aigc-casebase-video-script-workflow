@@ -1,29 +1,41 @@
 $ErrorActionPreference = "Stop"
 $ProjectDir = Split-Path -Parent $PSScriptRoot
+$EnvironmentName = "bili-script-tool"
 Set-Location $ProjectDir
 
-$PythonExe = Join-Path $ProjectDir ".venv\Scripts\python.exe"
-if (-not (Test-Path $PythonExe -PathType Leaf)) {
-    throw @"
-未找到 .venv\Scripts\python.exe。
-请先在 PyCharm 中为本项目新建 Virtualenv，位置选择：$ProjectDir\.venv
-建议使用 Python 3.11，然后重新运行本脚本。
-"@
+if (-not (Get-Command conda -ErrorAction SilentlyContinue)) {
+    throw "未找到 Conda。请先安装 Miniconda 或 Anaconda，然后重新打开 PowerShell。"
 }
 
-$RequiredTools = @("ffmpeg.exe", "ffprobe.exe", "ffplay.exe", "yt-dlp.exe")
-$MissingTools = @($RequiredTools | Where-Object {
-    -not (Test-Path (Join-Path $ProjectDir $_) -PathType Leaf)
-})
-if ($MissingTools.Count -gt 0) {
-    throw "项目根目录缺少：$($MissingTools -join ', ')。请手动复制这些文件，本脚本不会自动下载。"
+function Invoke-Conda {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    & conda @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Conda 命令执行失败：conda $($Arguments -join ' ')"
+    }
 }
 
-Write-Host "正在将 Python 依赖安装到 PyCharm 虚拟环境 .venv ..."
-& $PythonExe -m pip install -r requirements.txt
+$EnvironmentJson = & conda env list --json
 if ($LASTEXITCODE -ne 0) {
-    throw "Python 依赖安装失败。"
+    throw "无法读取 Conda 环境列表。"
 }
+$EnvironmentPaths = ($EnvironmentJson | ConvertFrom-Json).envs
+$EnvironmentExists = $EnvironmentPaths | Where-Object {
+    (Split-Path -Leaf $_) -eq $EnvironmentName
+}
+
+if (-not $EnvironmentExists) {
+    Write-Host "正在创建 Conda 环境 $EnvironmentName (Python 3.11)..."
+    Invoke-Conda -Arguments @("create", "--name", $EnvironmentName, "python=3.11", "-y")
+} else {
+    Write-Host "Conda 环境 $EnvironmentName 已存在，将继续安装或更新依赖。"
+}
+
+Invoke-Conda -Arguments @("install", "--name", $EnvironmentName, "--channel", "conda-forge", "ffmpeg", "-y")
+Invoke-Conda -Arguments @("run", "--name", $EnvironmentName, "python", "-m", "pip", "install", "--upgrade", "pip")
+Invoke-Conda -Arguments @("run", "--name", $EnvironmentName, "python", "-m", "pip", "install", "-r", "requirements.txt")
+Invoke-Conda -Arguments @("run", "--name", $EnvironmentName, "python", "-m", "pip", "install", "--upgrade", "yt-dlp[default]")
 
 if (-not (Test-Path .env)) {
     Copy-Item .env.example .env
@@ -32,7 +44,7 @@ if (-not (Test-Path .env)) {
 
 Write-Host ""
 Write-Host "Windows 环境安装完成。"
-Write-Host "1. 编辑 .env，填写 DASHSCOPE_API_KEY"
-Write-Host "2. 在 PyCharm 中将 .venv 设为项目解释器"
-Write-Host "3. 运行 run.py"
+Write-Host "1. 运行：conda activate $EnvironmentName"
+Write-Host "2. 编辑 .env，填写 DASHSCOPE_API_KEY"
+Write-Host "3. 运行：python run.py"
 
