@@ -9,8 +9,10 @@
 并在执行日志中保留带时间戳的阶段记录。转录固定使用 `large-v3-turbo` 模型。
 在 UID 模式下，每行输入一个纯数字 UID，并设置每个 UID 的获取数量（1–1000）后点击“开始构建”。
 工具会合并去重所有获取到的 BV 号、回填到界面，再自动进入原有入库流程。
-如果 B 站对用户空间接口返回 412 或 352 风控，界面默认会使用 Chrome 中的 B 站登录状态自动重试。
-使用前请确保 Chrome 已登录 B 站；不希望读取浏览器 Cookie 时，可在页面上取消勾选。
+
+> **UID 模式的运行前提：**电脑上需要安装 Chrome，并且 Chrome 中的 B 站账号需处于已登录状态。当 B 站对用户空间接口返回 412 或 352 风控时，程序会读取 Chrome 中已登录的 B 站 Cookie 并自动重试。建议在运行前先用 Chrome 登录 B 站，并访问一次目标用户空间。
+
+界面默认勾选“遇到 412/352 风控时，使用 Chrome 的 B 站登录状态重试”。手动输入 BV 号时通常不需要浏览器登录状态；如果取消该勾选，UID 获取触发风控后将无法使用 Cookie 重试。
 
 ## 项目结构
 
@@ -112,14 +114,102 @@ WHISPER_MODEL_DIR=models/whisper
 
 ## Windows 安装与启动
 
-安装 Python 3.11、FFmpeg 和 yt-dlp，并保证 `ffmpeg`、`yt-dlp` 可以从 `PATH` 找到。然后在 PowerShell 中运行：
+本项目在 Windows 上使用独立的 Conda 环境，环境名默认为 `bili-script-tool`，Python 版本为 3.11。
+
+### 1. 安装前准备
+
+1. 安装 [Miniconda](https://docs.conda.io/projects/miniconda/en/latest/) 或 Anaconda。推荐安装体积更小的 Miniconda。
+2. 如果要通过 UID 获取视频，需要安装 Chrome、在 Chrome 中登录 B 站，并建议先访问一次目标用户空间。触发 412/352 风控时，程序会读取该登录 Cookie 重试。
+3. 准备通义千问 API Key。首次使用 Whisper 时还会下载 `large-v3-turbo` 模型，请确保网络正常且磁盘空间充足。
+
+安装 Conda 后，请使用“Anaconda Prompt”或已初始化 Conda 的 PowerShell。如果 PowerShell 无法执行 `conda activate`，先运行 `conda init powershell`，然后关闭并重新打开 PowerShell。
+
+### 2. 进入项目目录
+
+把下面的路径替换为项目在本机的实际路径：
+
+```powershell
+Set-Location "D:\path\to\案例库构建v1.0"
+```
+
+### 3. 自动安装
+
+在 PowerShell 中运行：
 
 ```powershell
 .\scripts\setup_windows.ps1
-.\.venv\Scripts\pythonw.exe run.py
 ```
 
-不再把第三方 `.exe` 提交到项目中；这能避免来源不明、版本过期以及仓库体积过大的问题。
+该脚本会：
+
+- 创建 Python 3.11 Conda 环境 `bili-script-tool`；
+- 通过 `conda-forge` 安装 FFmpeg；
+- 安装 `requirements.txt` 中的 Python 依赖以及 `yt-dlp`；
+- 当 `.env` 不存在时，从 `.env.example` 复制生成。
+
+如果 PowerShell 禁止运行本地脚本，可仅在当前窗口临时放开限制后重试：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\setup_windows.ps1
+```
+
+### 4. 手动安装（可选）
+
+如果不使用自动脚本，可以依次运行：
+
+```powershell
+conda create --name bili-script-tool python=3.11 -y
+conda activate bili-script-tool
+conda install --channel conda-forge ffmpeg -y
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install --upgrade "yt-dlp[default]"
+
+Copy-Item .env.example .env
+```
+
+### 5. 配置 API Key
+
+用文本编辑器打开项目根目录中的 `.env`，至少填写：
+
+```dotenv
+DASHSCOPE_API_KEY=你的通义千问API密钥
+DASHSCOPE_ANALYSIS_MODEL=qwen-max
+DASHSCOPE_GENERATION_MODEL=qwen3.7-max
+WHISPER_MODEL_DIR=models/whisper
+```
+
+### 6. 检查环境
+
+每次启动前先激活 Conda 环境，然后检查 Python 和外部命令：
+
+```powershell
+conda activate bili-script-tool
+python --version
+python -c "import tkinter, dashscope, whisper; print('Tk', tkinter.TkVersion)"
+ffmpeg -version
+yt-dlp --version
+```
+
+如果提示找不到 `ffmpeg` 或 `yt-dlp`，请先确认命令行左侧显示 `(bili-script-tool)`，表示当前 Conda 环境已激活。
+
+### 7. 启动程序
+
+首次运行建议保留终端窗口，方便查看报错：
+
+```powershell
+conda activate bili-script-tool
+python run.py
+```
+
+如果不希望显示终端窗口，可以在环境激活后使用：
+
+```powershell
+pythonw run.py
+```
+
+项目不会提交 FFmpeg 或 yt-dlp 的第三方 `.exe` 文件；它们由 Conda 环境和 pip 管理，避免仓库内包含来源不明或过期的可执行文件。
 
 ## 开发与验证
 
