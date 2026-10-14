@@ -11,6 +11,7 @@ requires-python = ">=3.9"
 dependencies = [
   "dashscope>=1.20",
   "openai-whisper",
+  "mlx-whisper>=0.4.3; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.gui-scripts]

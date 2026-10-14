@@ -4,6 +4,8 @@ import queue
 import subprocess
 import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -201,6 +203,66 @@ class MediaProgressTests(unittest.TestCase):
         )
         self.assertEqual(output, ["10%", "50%", "100%"])
 
+    def test_apple_silicon_automatically_selects_mlx(self):
+        settings = SimpleNamespace()
+        with (
+            mock.patch(
+                "bili_script_tool.services.media_service._is_apple_silicon",
+                return_value=True,
+            ),
+            mock.patch(
+                "bili_script_tool.services.media_service._module_available",
+                return_value=True,
+            ),
+        ):
+            service = MediaService(settings)
+
+        self.assertEqual(service._transcription_backend, "mlx")
+
+    def test_mlx_module_and_model_are_reused_across_transcriptions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            audio_one = root / "one.wav"
+            audio_two = root / "two.wav"
+            audio_one.touch()
+            audio_two.touch()
+            settings = SimpleNamespace(
+                transcript_dir=root / "transcripts",
+                mlx_whisper_model="mlx-community/whisper-large-v3-turbo",
+            )
+            mlx_module = mock.Mock()
+            mlx_module.transcribe.side_effect = [
+                {"text": "first transcript"},
+                {"text": "second transcript"},
+            ]
+
+            with (
+                mock.patch(
+                    "bili_script_tool.services.media_service._is_apple_silicon",
+                    return_value=True,
+                ),
+                mock.patch(
+                    "bili_script_tool.services.media_service._module_available",
+                    return_value=True,
+                ),
+                mock.patch(
+                    "bili_script_tool.services.media_service.importlib.import_module",
+                    return_value=mlx_module,
+                ) as import_module,
+            ):
+                service = MediaService(settings)
+                first = service.transcribe(audio_one)
+                second = service.transcribe(audio_two)
+
+            self.assertEqual(first, "first transcript\n")
+            self.assertEqual(second, "second transcript\n")
+            import_module.assert_called_once_with("mlx_whisper")
+            self.assertEqual(mlx_module.transcribe.call_count, 2)
+            self.assertEqual(
+                mlx_module.transcribe.call_args.kwargs["path_or_hf_repo"],
+                settings.mlx_whisper_model,
+            )
+
     def test_get_user_bvids_uses_recent_flat_playlist(self):
         service = object.__new__(MediaService)
         service._run = mock.Mock(
@@ -363,6 +425,62 @@ class CaseBuildProgressTests(unittest.TestCase):
         self.assertEqual(media.request, ("12345", 1))
         self.assertEqual(result, ["BV1xx411c7mD"])
         self.assertEqual(resolved, ["BV1xx411c7mD"])
+
+    def test_download_and_analysis_overlap_transcription(self):
+        second_download_started = threading.Event()
+        first_transcription_started = threading.Event()
+        first_analysis_started = threading.Event()
+        second_transcription_started = threading.Event()
+
+        class Repository:
+            def __init__(self):
+                self.records = []
+
+            def existing_bvids(self):
+                return set()
+
+            def append(self, record):
+                self.records.append(record)
+
+        class Media:
+            def check_dependencies(self):
+                pass
+
+            def get_metadata(self, bvid):
+                return VideoMetadata("uploader", bvid, f"title-{bvid}")
+
+            def download_audio(self, metadata, progress=None):
+                if metadata.bvid == "BV2":
+                    second_download_started.set()
+                    if not first_transcription_started.wait(2):
+                        raise AssertionError("second download did not overlap transcription")
+                progress(100.0)
+                return Path(f"{metadata.bvid}.wav")
+
+            def transcribe(self, audio_path, progress=None):
+                if audio_path.stem == "BV1":
+                    first_transcription_started.set()
+                    if not second_download_started.wait(2):
+                        raise AssertionError("next download was not prefetched")
+                else:
+                    second_transcription_started.set()
+                progress(100.0)
+                return f"transcript-{audio_path.stem}"
+
+        class AI:
+            def analyze_transcript(self, transcript):
+                if transcript == "transcript-BV1":
+                    first_analysis_started.set()
+                    if not second_transcription_started.wait(2):
+                        raise AssertionError("analysis did not overlap next transcription")
+                return CaseAnalysis("summary", ["keyword"])
+
+        repository = Repository()
+        workflow = CaseBuildWorkflow(repository, Media(), AI())
+        workflow.run(["BV1", "BV2"])
+
+        self.assertTrue(first_analysis_started.is_set())
+        self.assertEqual([record.bvid for record in repository.records], ["BV1", "BV2"])
 
     def test_resolves_multiple_uids_and_deduplicates_bvids(self):
         class Repository:

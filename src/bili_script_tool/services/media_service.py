@@ -1,10 +1,14 @@
 """Cross-platform video download and speech-to-text operations."""
 
 from collections import deque
+import importlib
+import importlib.util
 import json
 from pathlib import Path
+import platform
 import re
 import subprocess
+import sys
 from typing import Callable, Optional, Sequence
 
 from ..config import (
@@ -15,7 +19,7 @@ from ..config import (
     subprocess_environment,
 )
 from ..domain import VideoMetadata
-from ..errors import DataValidationError, ExternalCommandError
+from ..errors import DataValidationError, DependencyError, ExternalCommandError
 
 
 LogCallback = Callable[[str], None]
@@ -39,6 +43,21 @@ def _extract_percent(output: str) -> Optional[float]:
     return max(0.0, min(100.0, float(matches[-1])))
 
 
+def _is_apple_silicon() -> bool:
+    """Return whether this process is native Apple Silicon on macOS."""
+    return sys.platform == "darwin" and platform.machine().lower() in {
+        "arm64",
+        "aarch64",
+    }
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 class MediaService:
     def __init__(
         self,
@@ -47,6 +66,10 @@ class MediaService:
     ):
         self.settings = settings
         self.log = log or (lambda _message: None)
+        self._mlx_whisper = None
+        self._transcription_backend = (
+            "mlx" if _is_apple_silicon() and _module_available("mlx_whisper") else "openai"
+        )
 
     def check_dependencies(self) -> None:
         require_executable(
@@ -64,11 +87,23 @@ class MediaService:
             "macOS 请运行 scripts/setup_macos.sh；Windows 请将 ffprobe.exe 放到项目根目录。",
             project_root=self.settings.project_root,
         )
-        require_executable(
-            "whisper",
-            "请在项目的 PyCharm 虚拟环境中安装 openai-whisper。",
-            project_root=self.settings.project_root,
-        )
+        if self._transcription_backend == "mlx":
+            self.log(
+                "语音转录后端：MLX（Apple Silicon GPU，模型将在本次运行中复用）。"
+            )
+        else:
+            require_executable(
+                "whisper",
+                "请在项目的虚拟环境中安装 openai-whisper。",
+                project_root=self.settings.project_root,
+            )
+            if _is_apple_silicon():
+                self.log(
+                    "未找到 mlx-whisper，已回退到 openai-whisper CPU 后端。"
+                    "运行 pip install mlx-whisper 可启用 Apple Silicon 加速。"
+                )
+            else:
+                self.log("语音转录后端：openai-whisper。")
 
     def _require_executable(self, name: str, install_hint: str) -> str:
         settings = getattr(self, "settings", None)
@@ -239,9 +274,55 @@ class MediaService:
         self.log(f"正在转写：{audio_path.name}")
         if progress:
             progress(0.0)
+        if self._transcription_backend == "mlx":
+            transcript = self._transcribe_with_mlx(audio_path)
+            transcript_path.write_text(transcript, encoding="utf-8")
+        else:
+            self._transcribe_with_openai(audio_path, progress)
+        if not transcript_path.exists():
+            raise ExternalCommandError(f"转写完成后未找到文本文件：{transcript_path}")
+        if progress:
+            progress(100.0)
+        return transcript_path.read_text(encoding="utf-8")
+
+    def _transcribe_with_mlx(self, audio_path: Path) -> str:
+        """Transcribe with MLX; its ModelHolder keeps weights resident in-process."""
+        if self._mlx_whisper is None:
+            try:
+                self._mlx_whisper = importlib.import_module("mlx_whisper")
+            except ImportError as exc:
+                raise DependencyError(
+                    "未安装 mlx-whisper。请重新运行 scripts/setup_macos.sh，"
+                    "或在虚拟环境中运行 pip install mlx-whisper。"
+                ) from exc
+            self.log(
+                f"正在加载 MLX 模型 {self.settings.mlx_whisper_model}；"
+                "首次使用需下载，后续视频将复用已加载模型。"
+            )
+
+        try:
+            result = self._mlx_whisper.transcribe(
+                str(audio_path),
+                path_or_hf_repo=self.settings.mlx_whisper_model,
+                language="zh",
+                verbose=None,
+            )
+        except Exception as exc:
+            raise ExternalCommandError(f"MLX 语音转录失败：{exc}") from exc
+
+        transcript = str(result.get("text", "")).strip()
+        if not transcript:
+            raise ExternalCommandError("MLX 语音转录未返回文本。")
+        return transcript + "\n"
+
+    def _transcribe_with_openai(
+        self,
+        audio_path: Path,
+        progress: Optional[ProgressCallback],
+    ) -> None:
         whisper = self._require_executable(
             "whisper",
-            "请在项目的 PyCharm 虚拟环境中安装 openai-whisper。",
+            "请在项目的虚拟环境中安装 openai-whisper。",
         )
         self._run_streaming(
             [
@@ -262,11 +343,6 @@ class MediaService:
             ],
             on_output=lambda output: self._handle_transcription_output(output, progress),
         )
-        if not transcript_path.exists():
-            raise ExternalCommandError(f"转写完成后未找到文本文件：{transcript_path}")
-        if progress:
-            progress(100.0)
-        return transcript_path.read_text(encoding="utf-8")
 
     def _handle_download_output(
         self,

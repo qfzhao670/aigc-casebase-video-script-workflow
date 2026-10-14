@@ -6,7 +6,13 @@
 2. **文案生成**：根据创作需求筛选参考案例，结合人工大纲和自定义要求生成新的视频文案。
 
 案例库构建页会实时显示整体进度、音频下载进度和 Whisper 语音转录进度，
-并在执行日志中保留带时间戳的阶段记录。转录固定使用 `large-v3-turbo` 模型。
+并在执行日志中保留带时间戳的阶段记录。转录使用 `large-v3-turbo`
+模型：Apple Silicon Mac 会自动使用 MLX GPU 后端，其他环境使用
+`openai-whisper`。同一批任务中模型只加载一次。
+
+处理多个视频时会自动使用流水线：当前视频转录时预下载下一条，
+下一条转录时并行分析上一条的摘要和关键词。转录本身仍保持单路，
+避免同时加载多份模型占满统一内存。
 在 UID 模式下，每行输入一个纯数字 UID，并设置每个 UID 的获取数量（1–1000）后点击“开始构建”。
 工具会合并去重所有获取到的 BV 号、回填到界面，再自动进入原有入库流程。
 
@@ -76,9 +82,22 @@ python -m pip install -r requirements.txt
 ```bash
 .venv/bin/python --version
 .venv/bin/python -c "import tkinter, dashscope, whisper; print('Tk', tkinter.TkVersion)"
+# 仅 Apple Silicon Mac 需要检查此项
+.venv/bin/python -c "import mlx_whisper; print('MLX Whisper OK')"
 ffmpeg -version
 yt-dlp --version
 ```
+
+如果现有 `.venv` 还没有 MLX，Apple Silicon Mac 只需补装这一项：
+
+```bash
+cd "/Users/zhaoqifan/AIGC/案例库构建v1.0"
+.venv/bin/python -m pip install --timeout 600 "mlx-whisper>=0.4.3"
+```
+
+安装包约需下载 70MB 的 Metal 运行库。首次真正转录时还会自动下载
+`mlx-community/whisper-large-v3-turbo` 模型；下载后会由 Hugging Face
+缓存，不会每次重新下载。
 
 ### 从零初始化
 
@@ -96,6 +115,7 @@ DASHSCOPE_API_KEY=你的通义千问API密钥
 DASHSCOPE_ANALYSIS_MODEL=qwen-max
 DASHSCOPE_GENERATION_MODEL=qwen3.7-max
 WHISPER_MODEL_DIR=models/whisper
+MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo
 ```
 
 以上配置与重构前保持一致：案例入库的摘要和关键词分析使用 `qwen-max`，案例筛选及
@@ -109,8 +129,9 @@ WHISPER_MODEL_DIR=models/whisper
 
 也可以在 Finder 中双击 `launch_macos.command`。不要使用 macOS 自带的
 `/usr/bin/python3` 启动：它可能链接到过旧的 Tk，无法在新版 macOS 上创建窗口。
-初始化脚本会建立使用新版 Tk 的独立 Python 环境。首次使用 Whisper 时会下载 `large-v3-turbo` 模型，
-请确保网络和磁盘空间充足。
+初始化脚本会建立使用新版 Tk 的独立 Python 环境。Apple Silicon Mac
+首次转录时会从 Hugging Face 下载 MLX 版 `large-v3-turbo` 模型；
+后续视频会复用内存中的模型。请确保网络和磁盘空间充足。
 
 ## Windows 安装与启动
 
@@ -197,6 +218,7 @@ DASHSCOPE_API_KEY=你的通义千问API密钥
 DASHSCOPE_ANALYSIS_MODEL=qwen-max
 DASHSCOPE_GENERATION_MODEL=qwen3.7-max
 WHISPER_MODEL_DIR=models/whisper
+MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo
 ```
 
 ### 6. 检查环境
@@ -248,7 +270,8 @@ python3 -m unittest discover -v
 - `data/dataset.jsonl`：每行一个案例，字段为 `uploader`、`bvid`、`title`、`text`、`summary`、`keywords`。
 - `data/audio/`：运行时生成的 WAV 文件，已被 Git 忽略。
 - `data/transcripts/`：运行时生成的转写文本，已被 Git 忽略。
-- `models/whisper/`：Whisper 模型文件，默认保存在项目内并被 Git 忽略。
+- `models/whisper/`：`openai-whisper` 模型文件，默认保存在项目内并被 Git 忽略。
+- MLX 模型由 Hugging Face 缓存管理，可用 `MLX_WHISPER_MODEL` 替换为其他兼容模型。
 - `examples/outline.txt`：示例大纲，可以在界面中选择任意其他文本文件。
 
 ## 安全说明

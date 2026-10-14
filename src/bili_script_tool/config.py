@@ -12,6 +12,7 @@ from .errors import ConfigurationError, DependencyError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WHISPER_MODEL = "large-v3-turbo"
+MLX_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 
 
 def load_dotenv(path: Path) -> None:
@@ -88,6 +89,7 @@ class Settings:
     dashscope_analysis_model: str
     dashscope_generation_model: str
     whisper_model_dir: Path
+    mlx_whisper_model: str
 
     @classmethod
     def from_environment(cls, project_root: Path = PROJECT_ROOT) -> "Settings":
@@ -115,6 +117,11 @@ class Settings:
                 os.environ.get("DASHSCOPE_MODEL", "qwen3.7-max"),
             ).strip(),
             whisper_model_dir=whisper_model_dir,
+            mlx_whisper_model=os.environ.get(
+                "MLX_WHISPER_MODEL",
+                MLX_WHISPER_MODEL,
+            ).strip()
+            or MLX_WHISPER_MODEL,
         )
 
     def ensure_work_directories(self) -> None:

@@ -1,9 +1,12 @@
 """Application workflows that coordinate storage, media, and AI services."""
 
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+import threading
 from typing import Callable, Iterable, List, Optional
 
-from ..domain import CaseRecord
+from ..domain import CaseAnalysis, CaseRecord, VideoMetadata
 from ..errors import ApplicationError, DataValidationError
 from .ai_service import DashScopeService
 from .case_repository import CaseRepository
@@ -14,6 +17,56 @@ LogCallback = Callable[[str], None]
 StopCallback = Callable[[], bool]
 ProgressCallback = Callable[[str, float, Optional[float]], None]
 BvidsCallback = Callable[[List[str]], None]
+
+
+@dataclass(frozen=True)
+class _PreparedVideo:
+    index: int
+    bvid: str
+    metadata: VideoMetadata
+    audio_path: Path
+
+
+@dataclass(frozen=True)
+class _TranscribedVideo:
+    index: int
+    bvid: str
+    metadata: VideoMetadata
+    transcript: str
+
+
+class _PipelineProgress:
+    """Aggregate concurrent per-video stages into one monotonic percentage."""
+
+    def __init__(self, total: int, callback: ProgressCallback):
+        self.total = total
+        self.callback = callback
+        self._item_percent = [0.0] * total
+        self._lock = threading.Lock()
+
+    def report(
+        self,
+        index: int,
+        stage: str,
+        item_percent: float,
+        stage_percent: Optional[float],
+    ) -> None:
+        with self._lock:
+            slot = index - 1
+            self._item_percent[slot] = max(
+                self._item_percent[slot],
+                max(0.0, min(100.0, item_percent)),
+            )
+            overall = sum(self._item_percent) / self.total
+            self.callback(
+                f"[{index}/{self.total}] {stage}",
+                overall,
+                stage_percent,
+            )
+
+    def overall(self) -> float:
+        with self._lock:
+            return sum(self._item_percent) / self.total
 
 
 class CaseBuildWorkflow:
@@ -133,79 +186,162 @@ class CaseBuildWorkflow:
         existing_ids = self.repository.existing_bvids()
         self.log(f"案例库已有 {len(existing_ids)} 条记录。")
         self.media.check_dependencies()
-
+        if stop_requested():
+            self.log("任务已停止。")
+            self.progress("任务已停止", 0.0, None)
+            return
+        tracker = _PipelineProgress(total, self.progress)
+        jobs = []
         for index, bvid in enumerate(normalized_ids, start=1):
-            item_start = (index - 1) / total * 100.0
-            item_end = index / total * 100.0
-
-            def report_stage(
-                stage: str,
-                stage_percent: Optional[float],
-                stage_start: float,
-                stage_end: float,
-            ) -> None:
-                fraction = 0.0 if stage_percent is None else stage_percent / 100.0
-                item_fraction = (stage_start + (stage_end - stage_start) * fraction) / 100.0
-                overall = item_start + (item_end - item_start) * item_fraction
-                self.progress(
-                    f"[{index}/{total}] {stage}",
-                    overall,
-                    stage_percent,
-                )
-
-            if stop_requested():
-                self.log("任务已停止。")
-                self.progress("任务已停止", item_start, None)
-                break
             if bvid in existing_ids:
-                self.log(f"[{index}/{len(normalized_ids)}] 已存在，跳过：{bvid}")
-                self.progress(f"[{index}/{total}] 已存在，已跳过", item_end, 100.0)
-                continue
+                self.log(f"[{index}/{total}] 已存在，跳过：{bvid}")
+                tracker.report(index, "已存在，已跳过", 100.0, 100.0)
+            else:
+                jobs.append((index, bvid))
 
+        if not jobs:
+            self.progress("案例库构建完成", 100.0, 100.0)
+            return
+
+        def prepare(index: int, bvid: str) -> _PreparedVideo:
+            self.log(f"[{index}/{total}] 正在预取视频：{bvid}")
+            tracker.report(index, "正在读取视频信息……", 0.0, None)
+            metadata = self.media.get_metadata(bvid)
+            tracker.report(index, "视频信息读取完成", 5.0, 100.0)
+            audio_path = self.media.download_audio(
+                metadata,
+                progress=lambda percent: tracker.report(
+                    index,
+                    "正在下载音频",
+                    5.0 + 25.0 * percent / 100.0,
+                    percent,
+                ),
+            )
+            return _PreparedVideo(index, bvid, metadata, audio_path)
+
+        def analyze(item: _TranscribedVideo) -> tuple[_TranscribedVideo, CaseAnalysis]:
+            self.log(f"[{item.index}/{total}] 正在生成摘要和关键词……")
+            tracker.report(
+                item.index,
+                "正在生成摘要和关键词……",
+                85.0,
+                None,
+            )
+            analysis = self.ai.analyze_transcript(item.transcript)
+            tracker.report(item.index, "摘要和关键词已生成", 98.0, 100.0)
+            return item, analysis
+
+        def fail(index: int, bvid: str, exc: ApplicationError) -> None:
+            self.log(f"处理失败，可稍后重试 {bvid}：{exc}")
+            tracker.report(index, "处理失败", 100.0, 100.0)
+
+        def finish_analysis(
+            pending_item: _TranscribedVideo,
+            future: Future[tuple[_TranscribedVideo, CaseAnalysis]],
+        ) -> None:
             try:
-                self.log(f"[{index}/{len(normalized_ids)}] 开始处理：{bvid}")
-                report_stage("正在读取视频信息……", None, 0.0, 5.0)
-                metadata = self.media.get_metadata(bvid)
-                report_stage("视频信息读取完成", 100.0, 0.0, 5.0)
-                audio_path = self.media.download_audio(
-                    metadata,
-                    progress=lambda percent: report_stage(
-                        "正在下载音频",
-                        percent,
-                        5.0,
-                        30.0,
-                    ),
-                )
-                transcript = self.media.transcribe(
-                    audio_path,
-                    progress=lambda percent: report_stage(
-                        "正在进行语音转录",
-                        percent,
-                        30.0,
-                        85.0,
-                    ),
-                )
-                self.log("正在生成摘要和关键词……")
-                report_stage("正在生成摘要和关键词……", None, 85.0, 98.0)
-                analysis = self.ai.analyze_transcript(transcript)
-                report_stage("正在写入案例库……", None, 98.0, 100.0)
+                item, analysis = future.result()
+                tracker.report(item.index, "正在写入案例库……", 98.0, None)
                 self.repository.append(
                     CaseRecord(
-                        uploader=metadata.uploader,
-                        bvid=metadata.bvid,
-                        title=metadata.title,
-                        text=transcript,
+                        uploader=item.metadata.uploader,
+                        bvid=item.metadata.bvid,
+                        title=item.metadata.title,
+                        text=item.transcript,
                         summary=analysis.summary,
                         keywords=analysis.keywords,
                     )
                 )
-                existing_ids.add(metadata.bvid)
-                self.log(f"入库成功：{metadata.title}")
-                self.progress(f"[{index}/{total}] 入库成功", item_end, 100.0)
+                existing_ids.add(item.metadata.bvid)
+                self.log(f"入库成功：{item.metadata.title}")
+                tracker.report(item.index, "入库成功", 100.0, 100.0)
             except ApplicationError as exc:
-                self.log(f"处理失败，可稍后重试 {bvid}：{exc}")
-                self.progress(f"[{index}/{total}] 处理失败", item_end, 100.0)
+                fail(pending_item.index, pending_item.bvid, exc)
 
+        pending_analysis: Optional[
+            tuple[
+                _TranscribedVideo,
+                Future[tuple[_TranscribedVideo, CaseAnalysis]],
+            ]
+        ] = None
+        stopped = False
+        download_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="bili-download",
+        )
+        analysis_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="bili-analysis",
+        )
+        current_download: Optional[Future[_PreparedVideo]] = download_executor.submit(
+            prepare,
+            *jobs[0],
+        )
+
+        try:
+            for position, (index, bvid) in enumerate(jobs):
+                if stop_requested():
+                    stopped = True
+                    break
+
+                assert current_download is not None
+                try:
+                    prepared = current_download.result()
+                except ApplicationError as exc:
+                    prepared = None
+                    fail(index, bvid, exc)
+
+                next_download = None
+                if position + 1 < len(jobs) and not stop_requested():
+                    next_download = download_executor.submit(prepare, *jobs[position + 1])
+
+                transcribed = None
+                if prepared is not None:
+                    try:
+                        transcript = self.media.transcribe(
+                            prepared.audio_path,
+                            progress=lambda percent, item_index=index: tracker.report(
+                                item_index,
+                                "正在进行语音转录",
+                                30.0 + 55.0 * percent / 100.0,
+                                percent,
+                            ),
+                        )
+                        transcribed = _TranscribedVideo(
+                            index,
+                            bvid,
+                            prepared.metadata,
+                            transcript,
+                        )
+                    except ApplicationError as exc:
+                        fail(index, bvid, exc)
+
+                if pending_analysis is not None:
+                    finish_analysis(*pending_analysis)
+                    pending_analysis = None
+
+                if stop_requested():
+                    stopped = True
+                    current_download = next_download
+                    break
+
+                if transcribed is not None:
+                    pending_analysis = (
+                        transcribed,
+                        analysis_executor.submit(analyze, transcribed),
+                    )
+
+                current_download = next_download
+
+            if pending_analysis is not None:
+                finish_analysis(*pending_analysis)
+        finally:
+            download_executor.shutdown(wait=True, cancel_futures=True)
+            analysis_executor.shutdown(wait=True, cancel_futures=True)
+
+        if stopped:
+            self.log("任务已停止。")
+            self.progress("任务已停止", tracker.overall(), None)
         else:
             self.progress("案例库构建完成", 100.0, 100.0)
 
