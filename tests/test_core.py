@@ -23,6 +23,7 @@ from bili_script_tool.services.ai_service import (
 from bili_script_tool.services.case_repository import CaseRepository
 from bili_script_tool.services.media_service import MediaService, _extract_percent
 from bili_script_tool.services.workflows import CaseBuildWorkflow
+from bili_script_tool.ui.case_builder_tab import CaseBuilderTab
 from bili_script_tool.ui.script_generator_tab import ScriptGeneratorTab
 
 
@@ -262,6 +263,25 @@ class MediaProgressTests(unittest.TestCase):
                 mlx_module.transcribe.call_args.kwargs["path_or_hf_repo"],
                 settings.mlx_whisper_model,
             )
+            self.assertFalse(mlx_module.transcribe.call_args.kwargs["verbose"])
+
+    def test_mlx_tqdm_output_is_forwarded_as_live_progress(self):
+        progress = []
+
+        def transcribe(*_args, **_kwargs):
+            sys.stderr.write("\r 12%|#         | 12/100 frames")
+            sys.stderr.write("\r 67%|######    | 67/100 frames")
+            sys.stderr.write("\r100%|##########| 100/100 frames")
+            return {"text": "transcript"}
+
+        service = object.__new__(MediaService)
+        service._mlx_whisper = SimpleNamespace(transcribe=transcribe)
+        service.settings = SimpleNamespace(mlx_whisper_model="mlx-model")
+
+        result = service._transcribe_with_mlx(Path("audio.wav"), progress.append)
+
+        self.assertEqual(result, "transcript\n")
+        self.assertEqual(progress, [12.0, 67.0, 100.0])
 
     def test_get_user_bvids_uses_recent_flat_playlist(self):
         service = object.__new__(MediaService)
@@ -538,6 +558,46 @@ class CaseBuildProgressTests(unittest.TestCase):
             ["BV1xx411c7mD", "BV1YY411c7Ab", "BV1ZZ411c7Cd"],
         )
         self.assertEqual(resolved, result)
+
+
+class CaseBuilderProgressPresentationTests(unittest.TestCase):
+    def test_routes_concurrent_stages_to_separate_lanes(self):
+        self.assertEqual(
+            CaseBuilderTab._progress_lane("[2/5] 正在下载音频"),
+            "download",
+        )
+        self.assertEqual(
+            CaseBuilderTab._progress_lane("[1/5] 正在进行语音转录"),
+            "transcribe",
+        )
+        self.assertEqual(
+            CaseBuilderTab._progress_lane("[1/5] 正在写入案例库……"),
+            "analysis",
+        )
+
+    def test_lane_status_includes_the_corresponding_bvid(self):
+        tab = object.__new__(CaseBuilderTab)
+        tab._task_bvids = ["BV-FIRST", "BV-SECOND"]
+
+        status = tab._format_lane_status(
+            "[2/5] 正在进行语音转录",
+            56.0,
+        )
+
+        self.assertEqual(
+            status,
+            "[2/5] BV-SECOND · 正在进行语音转录 · 56%",
+        )
+
+    def test_event_log_assigns_readable_lane_labels(self):
+        self.assertEqual(
+            CaseBuilderTab._log_lane("正在转写：BV1.wav"),
+            ("转录", "transcribe"),
+        )
+        self.assertEqual(
+            CaseBuilderTab._log_lane("入库成功：demo"),
+            ("分析", "analysis"),
+        )
 
 
 if __name__ == "__main__":

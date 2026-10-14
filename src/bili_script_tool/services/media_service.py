@@ -1,6 +1,7 @@
 """Cross-platform video download and speech-to-text operations."""
 
 from collections import deque
+from contextlib import redirect_stderr
 import importlib
 import importlib.util
 import json
@@ -41,6 +42,31 @@ def _extract_percent(output: str) -> Optional[float]:
     if not matches:
         return None
     return max(0.0, min(100.0, float(matches[-1])))
+
+
+class _TqdmProgressStream:
+    """Turn an in-process tqdm meter into ordinary progress callbacks."""
+
+    def __init__(self, callback: Optional[ProgressCallback]):
+        self.callback = callback
+        self._last_percent: Optional[float] = None
+
+    def write(self, output: str) -> int:
+        percent = _extract_percent(output)
+        if (
+            percent is not None
+            and percent != self._last_percent
+            and self.callback is not None
+        ):
+            self._last_percent = percent
+            self.callback(percent)
+        return len(output)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
 
 
 def _is_apple_silicon() -> bool:
@@ -275,7 +301,7 @@ class MediaService:
         if progress:
             progress(0.0)
         if self._transcription_backend == "mlx":
-            transcript = self._transcribe_with_mlx(audio_path)
+            transcript = self._transcribe_with_mlx(audio_path, progress)
             transcript_path.write_text(transcript, encoding="utf-8")
         else:
             self._transcribe_with_openai(audio_path, progress)
@@ -285,7 +311,11 @@ class MediaService:
             progress(100.0)
         return transcript_path.read_text(encoding="utf-8")
 
-    def _transcribe_with_mlx(self, audio_path: Path) -> str:
+    def _transcribe_with_mlx(
+        self,
+        audio_path: Path,
+        progress: Optional[ProgressCallback] = None,
+    ) -> str:
         """Transcribe with MLX; its ModelHolder keeps weights resident in-process."""
         if self._mlx_whisper is None:
             try:
@@ -301,12 +331,16 @@ class MediaService:
             )
 
         try:
-            result = self._mlx_whisper.transcribe(
-                str(audio_path),
-                path_or_hf_repo=self.settings.mlx_whisper_model,
-                language="zh",
-                verbose=None,
-            )
+            # mlx-whisper exposes its live position through tqdm rather than a
+            # callback. Capture that meter so the desktop UI receives the same
+            # incremental percentages as the command-line Whisper backend.
+            with redirect_stderr(_TqdmProgressStream(progress)):
+                result = self._mlx_whisper.transcribe(
+                    str(audio_path),
+                    path_or_hf_repo=self.settings.mlx_whisper_model,
+                    language="zh",
+                    verbose=False,
+                )
         except Exception as exc:
             raise ExternalCommandError(f"MLX 语音转录失败：{exc}") from exc
 

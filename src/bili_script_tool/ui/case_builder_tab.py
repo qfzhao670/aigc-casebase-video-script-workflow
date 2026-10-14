@@ -3,6 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -21,8 +22,7 @@ class CaseBuilderTab(ttk.Frame):
         self._ui_events: queue.Queue[tuple] = queue.Queue()
         self._worker_active = False
         self._event_poll_scheduled = False
-        self._last_progress_stage = ""
-        self._last_progress_bucket = -1
+        self._task_bvids: list[str] = []
         self._create_widgets()
 
     def _create_widgets(self) -> None:
@@ -135,10 +135,10 @@ class CaseBuilderTab(ttk.Frame):
 
         progress_frame = ttk.LabelFrame(self, text="任务进度", padding=10)
         progress_frame.grid(row=2, column=0, sticky=tk.EW, pady=(0, 10))
-        progress_frame.columnconfigure(0, weight=1)
+        progress_frame.columnconfigure(1, weight=1)
         self.progress_status = tk.StringVar(value="就绪")
         ttk.Label(progress_frame, textvariable=self.progress_status).grid(
-            row=0, column=0, sticky=tk.W, pady=(0, 6)
+            row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 6)
         )
         self.progress_value = tk.DoubleVar(value=0.0)
         self.progress_bar = ttk.Progressbar(
@@ -147,9 +147,46 @@ class CaseBuilderTab(ttk.Frame):
             maximum=100.0,
             mode="determinate",
         )
-        self.progress_bar.grid(row=1, column=0, sticky=tk.EW)
+        self.progress_bar.grid(row=1, column=0, columnspan=3, sticky=tk.EW)
 
-        log_frame = ttk.LabelFrame(self, text="执行日志", padding=10)
+        ttk.Separator(progress_frame).grid(
+            row=2, column=0, columnspan=3, sticky=tk.EW, pady=9
+        )
+        self.pipeline_status: dict[str, tk.StringVar] = {}
+        self.pipeline_value: dict[str, tk.DoubleVar] = {}
+        for row, (lane, title) in enumerate(
+            (
+                ("download", "下载"),
+                ("transcribe", "语音转录"),
+                ("analysis", "分析入库"),
+            ),
+            start=3,
+        ):
+            ttk.Label(progress_frame, text=title, width=9).grid(
+                row=row, column=0, sticky=tk.W, pady=2
+            )
+            value = tk.DoubleVar(value=0.0)
+            ttk.Progressbar(
+                progress_frame,
+                variable=value,
+                maximum=100.0,
+                mode="determinate",
+            ).grid(row=row, column=1, sticky=tk.EW, padx=(0, 10), pady=2)
+            status = tk.StringVar(value="等待中")
+            ttk.Label(
+                progress_frame,
+                textvariable=status,
+                width=34,
+                anchor=tk.W,
+            ).grid(row=row, column=2, sticky=tk.W, pady=2)
+            self.pipeline_value[lane] = value
+            self.pipeline_status[lane] = status
+
+        log_frame = ttk.LabelFrame(
+            self,
+            text="事件日志 · 实时百分比见上方",
+            padding=10,
+        )
         log_frame.grid(row=3, column=0, sticky=tk.NSEW)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
@@ -160,6 +197,14 @@ class CaseBuilderTab(ttk.Frame):
             wrap=tk.WORD,
         )
         self.log_output.grid(row=0, column=0, sticky=tk.NSEW)
+        self.log_output.tag_configure("timestamp", foreground="#777777")
+        self.log_output.tag_configure("download", foreground="#0969da")
+        self.log_output.tag_configure("transcribe", foreground="#8250df")
+        self.log_output.tag_configure("analysis", foreground="#007a7a")
+        self.log_output.tag_configure("task", foreground="#57606a")
+        self.log_output.tag_configure("success", foreground="#18794e")
+        self.log_output.tag_configure("warning", foreground="#9a6700")
+        self.log_output.tag_configure("error", foreground="#cf222e")
         self._update_source_controls()
 
     def _browse_library(self) -> None:
@@ -212,8 +257,8 @@ class CaseBuilderTab(ttk.Frame):
         self._clear_log()
         self.progress_value.set(0.0)
         self.progress_status.set("正在启动……")
-        self._last_progress_stage = ""
-        self._last_progress_bucket = -1
+        self._task_bvids = list(bvids)
+        self._reset_pipeline_progress()
         self._worker_active = True
         self._set_running(True)
         self._append_log("开始执行案例库构建任务。")
@@ -258,7 +303,8 @@ class CaseBuilderTab(ttk.Frame):
                 )
             else:
                 workflow.run(bvids, should_stop=self.stop_event.is_set)
-            self._thread_log("任务结束。")
+            if not self.stop_event.is_set():
+                self._thread_log("案例库构建完成。")
         except Exception as exc:
             self._thread_log(f"任务失败：{exc}")
             self._ui_events.put(("error", str(exc)))
@@ -315,6 +361,9 @@ class CaseBuilderTab(ttk.Frame):
 
     def _drain_ui_events(self) -> None:
         self._event_poll_scheduled = False
+        latest_progress: dict[str, tuple[int, tuple]] = {}
+        progress_sequence = 0
+        terminal_status: Optional[str] = None
         while True:
             try:
                 event = self._ui_events.get_nowait()
@@ -325,20 +374,29 @@ class CaseBuilderTab(ttk.Frame):
             if event_type == "log":
                 self._append_log(event[1])
             elif event_type == "bvids":
+                self._task_bvids = list(event[1])
                 self.bvid_input.configure(state=tk.NORMAL)
                 self.bvid_input.delete("1.0", tk.END)
                 self.bvid_input.insert("1.0", "\n".join(event[1]))
                 self.bvid_input.configure(state=tk.DISABLED)
             elif event_type == "progress":
-                self._show_progress(event[1], event[2], event[3])
+                lane = self._progress_lane(event[1]) or "overall"
+                latest_progress[lane] = (progress_sequence, event)
+                progress_sequence += 1
             elif event_type == "error":
-                self.progress_status.set("任务失败")
+                terminal_status = "任务失败"
                 messagebox.showerror("案例库构建失败", event[1])
             elif event_type == "finished":
                 self._worker_active = False
                 self._set_running(False)
-                if self.stop_event.is_set():
-                    self.progress_status.set("任务已停止")
+
+        # Whisper and yt-dlp can emit many updates between two Tk refreshes.
+        # Rendering only the newest value for each lane keeps the UI responsive
+        # without sacrificing the visible, near-real-time progress.
+        for _sequence, event in sorted(latest_progress.values()):
+            self._show_progress(event[1], event[2], event[3])
+        if terminal_status is not None:
+            self.progress_status.set(terminal_status)
 
         if self._worker_active or not self._ui_events.empty():
             self._schedule_event_poll()
@@ -351,24 +409,86 @@ class CaseBuilderTab(ttk.Frame):
     ) -> None:
         overall_percent = max(0.0, min(100.0, overall_percent))
         self.progress_value.set(overall_percent)
+        lane = self._progress_lane(stage)
         if stage_percent is None:
-            status = f"{stage}（总进度 {overall_percent:.0f}%）"
+            status = stage
         else:
             stage_percent = max(0.0, min(100.0, stage_percent))
-            status = (
-                f"{stage}：{stage_percent:.0f}%"
-                f"（总进度 {overall_percent:.0f}%）"
-            )
-        self.progress_status.set(status)
+            status = f"{stage}：{stage_percent:.0f}%"
+        self.progress_status.set(f"总进度 {overall_percent:.0f}% · {status}")
 
-        bucket = -1 if stage_percent is None else int(stage_percent // 10)
-        if stage != self._last_progress_stage:
-            self._append_log(status)
-            self._last_progress_stage = stage
-            self._last_progress_bucket = bucket
-        elif bucket > self._last_progress_bucket:
-            self._append_log(status)
-            self._last_progress_bucket = bucket
+        if lane is None:
+            if stage in {"任务已停止", "案例库构建完成", "没有可处理的 BV 号"}:
+                self._finish_pipeline_progress(stage)
+            return
+
+        if stage_percent is None:
+            lane_value = 98.0 if "写入案例库" in stage else 0.0
+        else:
+            lane_value = stage_percent
+        self.pipeline_value[lane].set(lane_value)
+        self.pipeline_status[lane].set(
+            self._format_lane_status(stage, stage_percent)
+        )
+
+    @staticmethod
+    def _progress_lane(stage: str) -> Optional[str]:
+        if any(
+            marker in stage
+            for marker in ("读取视频信息", "下载音频", "视频信息读取完成")
+        ):
+            return "download"
+        if "语音转录" in stage:
+            return "transcribe"
+        if any(
+            marker in stage
+            for marker in (
+                "摘要和关键词",
+                "写入案例库",
+                "入库成功",
+                "处理失败",
+                "已存在",
+            )
+        ):
+            return "analysis"
+        return None
+
+    def _format_lane_status(
+        self,
+        stage: str,
+        stage_percent: Optional[float],
+    ) -> str:
+        position = re.match(r"^\[(\d+)/(\d+)\]\s*(.*)$", stage)
+        if position:
+            index = int(position.group(1))
+            total = position.group(2)
+            detail = position.group(3).rstrip("…")
+            bvid = ""
+            if 1 <= index <= len(self._task_bvids):
+                bvid = f" {self._task_bvids[index - 1]}"
+            prefix = f"[{index}/{total}]{bvid}"
+        else:
+            prefix = ""
+            detail = stage.rstrip("…")
+
+        percent = "" if stage_percent is None else f" · {stage_percent:.0f}%"
+        return f"{prefix} · {detail}{percent}".strip(" ·")
+
+    def _reset_pipeline_progress(self) -> None:
+        for lane in self.pipeline_value:
+            self.pipeline_value[lane].set(0.0)
+            self.pipeline_status[lane].set("等待中")
+
+    def _finish_pipeline_progress(self, stage: str) -> None:
+        if stage == "案例库构建完成":
+            for lane in self.pipeline_value:
+                self.pipeline_value[lane].set(100.0)
+                self.pipeline_status[lane].set("已完成")
+        elif stage == "任务已停止":
+            for lane in self.pipeline_status:
+                current = self.pipeline_status[lane].get()
+                if current not in {"等待中", "已完成"}:
+                    self.pipeline_status[lane].set(f"{current} · 已停止")
 
     def _discard_pending_events(self) -> None:
         while True:
@@ -384,8 +504,43 @@ class CaseBuilderTab(ttk.Frame):
 
     def _append_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
+        if any(
+            message.startswith(prefix)
+            for prefix in ("[download] Destination:", "[ExtractAudio] Destination:")
+        ):
+            return
+        if any(marker in message for marker in ("失败", "错误")):
+            tag = "error"
+        elif any(marker in message for marker in ("停止", "风控", "回退")):
+            tag = "warning"
+        elif any(marker in message for marker in ("成功", "完成")):
+            tag = "success"
+        else:
+            tag = None
+        lane, lane_tag = self._log_lane(message)
         self.log_output.configure(state=tk.NORMAL)
-        self.log_output.insert(tk.END, f"[{timestamp}] {message}\n")
+        self.log_output.insert(tk.END, f"[{timestamp}] ", "timestamp")
+        self.log_output.insert(tk.END, f"[{lane}] ", lane_tag)
+        if tag is None:
+            self.log_output.insert(tk.END, f"{message}\n")
+        else:
+            self.log_output.insert(tk.END, f"{message}\n", tag)
         self.log_output.see(tk.END)
         self.log_output.configure(state=tk.DISABLED)
+
+    @staticmethod
+    def _log_lane(message: str) -> tuple[str, str]:
+        if any(
+            marker in message
+            for marker in ("预取视频", "下载音频", "音频已存在")
+        ):
+            return "下载", "download"
+        if any(
+            marker in message
+            for marker in ("转写", "Whisper", "whisper", "MLX", "语音转录后端")
+        ):
+            return "转录", "transcribe"
+        if any(marker in message for marker in ("摘要和关键词", "入库")):
+            return "分析", "analysis"
+        return "任务", "task"
 
