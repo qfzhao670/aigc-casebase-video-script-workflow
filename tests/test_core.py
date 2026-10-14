@@ -19,9 +19,14 @@ from bili_script_tool.services.ai_service import (
     DashScopeService,
     _parse_json,
     _prefilter_cases,
+    _strip_segment_timestamps,
 )
 from bili_script_tool.services.case_repository import CaseRepository
-from bili_script_tool.services.media_service import MediaService, _extract_percent
+from bili_script_tool.services.media_service import (
+    MediaService,
+    _extract_percent,
+    _format_timestamped_transcript,
+)
 from bili_script_tool.services.workflows import CaseBuildWorkflow
 from bili_script_tool.ui.case_builder_tab import CaseBuilderTab
 from bili_script_tool.ui.script_generator_tab import ScriptGeneratorTab
@@ -73,6 +78,13 @@ class RepositoryTests(unittest.TestCase):
 
 
 class AIHelpersTests(unittest.TestCase):
+    def test_strips_segment_timestamps_from_prose(self):
+        transcript = (
+            "[00:00:01.250 --> 00:00:03.500] 第一句。\n"
+            "[00:00:03.500 --> 00:00:08.000] 第二句。"
+        )
+        self.assertEqual(_strip_segment_timestamps(transcript), "第一句。\n第二句。")
+
     def test_passes_disabled_thinking_to_dashscope(self):
         generation = mock.Mock()
         generation.call.return_value = mock.Mock(
@@ -169,6 +181,27 @@ class MediaProgressTests(unittest.TestCase):
         self.assertEqual(_extract_percent(" 67%|###### | 123/456 frames"), 67.0)
         self.assertEqual(_extract_percent("\x1b[32m100%\x1b[0m"), 100.0)
         self.assertIsNone(_extract_percent("loading model"))
+
+    def test_formats_mlx_segments_with_timestamps(self):
+        result = {
+            "text": "第一句。第二句。",
+            "segments": [
+                {"start": 1.25, "end": 3.5, "text": " 第一句。"},
+                {"start": 3.5, "end": 68, "text": " 第二句。 "},
+            ],
+        }
+
+        self.assertEqual(
+            _format_timestamped_transcript(result),
+            "[00:00:01.250 --> 00:00:03.500] 第一句。\n"
+            "[00:00:03.500 --> 00:01:08.000] 第二句。",
+        )
+
+    def test_mlx_transcript_falls_back_when_segments_are_missing(self):
+        self.assertEqual(
+            _format_timestamped_transcript({"text": "plain transcript"}),
+            "plain transcript",
+        )
 
     def test_windows_executable_discovery_prefers_project_root(self):
         with tempfile.TemporaryDirectory() as temp_dir:

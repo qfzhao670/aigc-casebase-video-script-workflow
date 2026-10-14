@@ -8,6 +8,17 @@ from ..domain import CaseAnalysis, CaseRecord
 from ..errors import AIServiceError, DependencyError
 
 
+_SEGMENT_TIMESTAMP = re.compile(
+    r"(?m)^\[\d{2,}:\d{2}:\d{2}(?:\.\d{3})?\s+-->\s+"
+    r"\d{2,}:\d{2}:\d{2}(?:\.\d{3})?\]\s*"
+)
+
+
+def _strip_segment_timestamps(text: str) -> str:
+    """Remove stored Whisper timestamps before using a transcript as prose."""
+    return _SEGMENT_TIMESTAMP.sub("", text)
+
+
 class DashScopeService:
     DEFAULT_REQUEST_TIMEOUT_SECONDS = 300
     SELECTION_REQUEST_TIMEOUT_SECONDS = 120
@@ -69,6 +80,7 @@ class DashScopeService:
             raise AIServiceError("DashScope 返回了无法识别的响应格式") from exc
 
     def analyze_transcript(self, transcript: str) -> CaseAnalysis:
+        transcript_for_analysis = _strip_segment_timestamps(transcript)
         prompt = f"""请分析以下视频口播转写文本，并只返回标准 JSON 对象。
 
 要求：
@@ -79,7 +91,7 @@ class DashScopeService:
 {{"summary": "...", "keywords": ["..."]}}
 
 转写文本：
-{transcript[:15000]}
+{transcript_for_analysis[:15000]}
 """
         content = self.complete(
             prompt,
@@ -151,8 +163,13 @@ class DashScopeService:
         outline: str,
         requirements: str,
     ) -> str:
+        cleaned_templates = (
+            _strip_segment_timestamps(text) for text in templates if text.strip()
+        )
         templates_text = "\n\n".join(
-            f"<template>\n{text}\n</template>" for text in templates if text.strip()
+            f"<template>\n{text}\n</template>"
+            for text in cleaned_templates
+            if text.strip()
         )
         if not templates_text:
             raise AIServiceError("所选案例中没有可用的文案正文")

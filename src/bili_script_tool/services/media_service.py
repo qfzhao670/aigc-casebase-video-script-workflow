@@ -44,6 +44,41 @@ def _extract_percent(output: str) -> Optional[float]:
     return max(0.0, min(100.0, float(matches[-1])))
 
 
+def _format_timestamp(seconds: object) -> str:
+    """Format a Whisper timestamp as HH:MM:SS.mmm."""
+    try:
+        total_milliseconds = max(0, round(float(seconds) * 1000))
+    except (TypeError, ValueError):
+        total_milliseconds = 0
+    hours, remainder = divmod(total_milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    whole_seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}.{milliseconds:03d}"
+
+
+def _format_timestamped_transcript(result: object) -> str:
+    """Build readable segment-level text while retaining a plain-text fallback."""
+    if not isinstance(result, dict):
+        return ""
+
+    lines = []
+    segments = result.get("segments", [])
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
+                continue
+            text = str(segment.get("text", "")).strip()
+            if not text:
+                continue
+            start = _format_timestamp(segment.get("start", 0))
+            end = _format_timestamp(segment.get("end", 0))
+            lines.append(f"[{start} --> {end}] {text}")
+
+    if lines:
+        return "\n".join(lines)
+    return str(result.get("text", "")).strip()
+
+
 class _TqdmProgressStream:
     """Turn an in-process tqdm meter into ordinary progress callbacks."""
 
@@ -344,7 +379,7 @@ class MediaService:
         except Exception as exc:
             raise ExternalCommandError(f"MLX 语音转录失败：{exc}") from exc
 
-        transcript = str(result.get("text", "")).strip()
+        transcript = _format_timestamped_transcript(result)
         if not transcript:
             raise ExternalCommandError("MLX 语音转录未返回文本。")
         return transcript + "\n"
