@@ -24,6 +24,7 @@ class ServiceFactory:
         return DashScopeService(
             api_key=self.settings.require_api_key(),
             model=self.settings.dashscope_generation_model,
+            enable_thinking=False,
         )
 
     def case_builder(

@@ -2,16 +2,27 @@
 
 import json
 import re
-from typing import Any, Iterable, List, Sequence
+from typing import Any, Iterable, List, Optional, Sequence
 
 from ..domain import CaseAnalysis, CaseRecord
 from ..errors import AIServiceError, DependencyError
 
 
 class DashScopeService:
-    def __init__(self, api_key: str, model: str):
+    DEFAULT_REQUEST_TIMEOUT_SECONDS = 300
+    SELECTION_REQUEST_TIMEOUT_SECONDS = 120
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        enable_thinking: Optional[bool] = None,
+        request_timeout: int = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+    ):
         self.api_key = api_key
         self.model = model
+        self.enable_thinking = enable_thinking
+        self.request_timeout = request_timeout
 
     def _generation_class(self) -> Any:
         try:
@@ -22,19 +33,30 @@ class DashScopeService:
             ) from exc
         return Generation
 
-    def complete(self, prompt: str, system_prompt: str = "") -> str:
+    def complete(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        request_timeout: Optional[int] = None,
+    ) -> str:
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
         generation = self._generation_class()
-        response = generation.call(
-            api_key=self.api_key,
-            model=self.model,
-            messages=messages,
-            result_format="message",
-        )
+        call_options = {
+            "api_key": self.api_key,
+            "model": self.model,
+            "messages": messages,
+            "result_format": "message",
+            "timeout": (
+                self.request_timeout if request_timeout is None else request_timeout
+            ),
+        }
+        if self.enable_thinking is not None:
+            call_options["enable_thinking"] = self.enable_thinking
+        response = generation.call(**call_options)
         status_code = getattr(response, "status_code", None)
         if status_code != 200:
             code = getattr(response, "code", "unknown")
@@ -105,7 +127,13 @@ class DashScopeService:
 请选择最符合需求风格的 {top_n} 个案例。
 只返回包含 bvid 的 JSON 数组，不要解释。例如：["BV1...", "BV2..."]
 """
-        value = _parse_json(self.complete(prompt, system_prompt="你是专业的视频内容策划。"))
+        value = _parse_json(
+            self.complete(
+                prompt,
+                system_prompt="你是专业的视频内容策划。",
+                request_timeout=self.SELECTION_REQUEST_TIMEOUT_SECONDS,
+            )
+        )
         if not isinstance(value, list):
             raise AIServiceError("案例筛选结果不是 JSON 数组")
 

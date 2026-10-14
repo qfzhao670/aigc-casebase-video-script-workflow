@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import tempfile
@@ -12,10 +13,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bili_script_tool.config import WHISPER_MODEL, find_executable, subprocess_environment
 from bili_script_tool.domain import CaseAnalysis, CaseRecord, VideoMetadata
 from bili_script_tool.errors import AIServiceError, DataValidationError, ExternalCommandError
-from bili_script_tool.services.ai_service import _parse_json, _prefilter_cases
+from bili_script_tool.services.ai_service import (
+    DashScopeService,
+    _parse_json,
+    _prefilter_cases,
+)
 from bili_script_tool.services.case_repository import CaseRepository
 from bili_script_tool.services.media_service import MediaService, _extract_percent
 from bili_script_tool.services.workflows import CaseBuildWorkflow
+from bili_script_tool.ui.script_generator_tab import ScriptGeneratorTab
 
 
 def make_case(bvid: str, title: str, keywords=None) -> CaseRecord:
@@ -64,8 +70,44 @@ class RepositoryTests(unittest.TestCase):
 
 
 class AIHelpersTests(unittest.TestCase):
+    def test_passes_disabled_thinking_to_dashscope(self):
+        generation = mock.Mock()
+        generation.call.return_value = mock.Mock(
+            status_code=200,
+            output=mock.Mock(
+                choices=[mock.Mock(message=mock.Mock(content="done"))]
+            ),
+        )
+        service = DashScopeService(
+            api_key="test-key",
+            model="qwen3.7-max",
+            enable_thinking=False,
+        )
+
+        with mock.patch.object(service, "_generation_class", return_value=generation):
+            result = service.complete("hello")
+
+        self.assertEqual(result, "done")
+        self.assertFalse(generation.call.call_args.kwargs["enable_thinking"])
+        self.assertEqual(
+            generation.call.call_args.kwargs["timeout"],
+            DashScopeService.DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        )
+
     def test_parses_json_code_fence(self):
         self.assertEqual(_parse_json('```json\n["BV1"]\n```'), ["BV1"])
+
+    def test_case_selection_uses_shorter_timeout(self):
+        service = DashScopeService(api_key="test-key", model="qwen3.7-max")
+        service.complete = mock.Mock(return_value='["BV1"]')
+
+        result = service.select_cases([make_case("BV1", "demo")], "科技", 1)
+
+        self.assertEqual(result, ["BV1"])
+        self.assertEqual(
+            service.complete.call_args.kwargs["request_timeout"],
+            DashScopeService.SELECTION_REQUEST_TIMEOUT_SECONDS,
+        )
 
     def test_rejects_missing_json(self):
         with self.assertRaises(AIServiceError):
@@ -78,6 +120,41 @@ class AIHelpersTests(unittest.TestCase):
         ]
         selected = _prefilter_cases(cases, "科技类人工智能视频", limit=1)
         self.assertEqual(selected[0].bvid, "BV2")
+
+
+class ScriptGeneratorThreadTests(unittest.TestCase):
+    def test_search_worker_queues_ui_updates(self):
+        selected = [make_case("BV1", "demo")]
+        workflow = mock.Mock()
+        workflow.select_cases.return_value = selected
+        tab = object.__new__(ScriptGeneratorTab)
+        tab.factory = mock.Mock()
+        tab.factory.script_generator.return_value = workflow
+        tab._ui_events = queue.Queue()
+
+        tab._search_worker(Path("cases.jsonl"), "requirement", 1)
+
+        self.assertEqual(tab._ui_events.get_nowait(), ("selected_cases", selected))
+        self.assertEqual(tab._ui_events.get_nowait(), ("finished",))
+
+    def test_main_thread_drains_result_and_restores_controls(self):
+        selected = [make_case("BV1", "demo")]
+        tab = object.__new__(ScriptGeneratorTab)
+        tab._ui_events = queue.Queue()
+        tab._ui_events.put(("selected_cases", selected))
+        tab._ui_events.put(("finished",))
+        tab._event_poll_scheduled = True
+        tab._worker_active = True
+        tab._show_selected_cases = mock.Mock()
+        tab._set_busy = mock.Mock()
+        tab._schedule_event_poll = mock.Mock()
+
+        tab._drain_ui_events()
+
+        tab._show_selected_cases.assert_called_once_with(selected)
+        tab._set_busy.assert_called_once_with(False, "就绪")
+        self.assertFalse(tab._worker_active)
+        tab._schedule_event_poll.assert_not_called()
 
 
 class MediaProgressTests(unittest.TestCase):

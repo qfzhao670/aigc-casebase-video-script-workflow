@@ -1,6 +1,7 @@
 """Reference selection and script generation tab."""
 
 from pathlib import Path
+import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -22,6 +23,9 @@ class ScriptGeneratorTab(ttk.Frame):
         self.settings = settings
         self.factory = factory
         self.selected_cases: List[CaseRecord] = []
+        self._ui_events: queue.Queue[tuple] = queue.Queue()
+        self._worker_active = False
+        self._event_poll_scheduled = False
         self._create_widgets()
 
     def _create_widgets(self) -> None:
@@ -97,8 +101,16 @@ class ScriptGeneratorTab(ttk.Frame):
             fill=tk.X, pady=(6, 0)
         )
 
+        status_frame = ttk.Frame(self)
+        status_frame.pack(fill=tk.X, pady=(5, 0))
         self.status = tk.StringVar(value="就绪")
-        ttk.Label(self, textvariable=self.status).pack(fill=tk.X, pady=(5, 0))
+        ttk.Label(status_frame, textvariable=self.status).pack(side=tk.LEFT, fill=tk.X)
+        self.busy_indicator = ttk.Progressbar(
+            status_frame,
+            mode="indeterminate",
+            length=140,
+        )
+        self.busy_indicator.pack(side=tk.RIGHT)
 
     def _browse_library(self) -> None:
         path = filedialog.askopenfilename(
@@ -128,7 +140,10 @@ class ScriptGeneratorTab(ttk.Frame):
             messagebox.showwarning("缺少筛选要求", "请输入案例筛选要求。")
             return
 
+        self._discard_pending_events()
+        self._worker_active = True
         self._set_busy(True, "正在筛选参考案例……")
+        self._schedule_event_poll()
         threading.Thread(
             target=self._search_worker,
             args=(library_path, requirement, int(self.top_n.get())),
@@ -139,11 +154,11 @@ class ScriptGeneratorTab(ttk.Frame):
         try:
             workflow = self.factory.script_generator(library_path)
             selected = workflow.select_cases(requirement, top_n)
-            self.after(0, self._show_selected_cases, selected)
+            self._ui_events.put(("selected_cases", selected))
         except Exception as exc:
-            self.after(0, messagebox.showerror, "案例筛选失败", str(exc))
+            self._ui_events.put(("error", "案例筛选失败", str(exc)))
         finally:
-            self.after(0, self._set_busy, False, "就绪")
+            self._ui_events.put(("finished",))
 
     def _show_selected_cases(self, cases: List[CaseRecord]) -> None:
         self.selected_cases = cases
@@ -175,7 +190,10 @@ class ScriptGeneratorTab(ttk.Frame):
             messagebox.showwarning("输入不完整", "请保留参考案例并填写文案要求。")
             return
 
+        self._discard_pending_events()
+        self._worker_active = True
         self._set_busy(True, "正在生成文案……")
+        self._schedule_event_poll()
         threading.Thread(
             target=self._generation_worker,
             args=(library_path, outline_path, bvids, requirements),
@@ -192,11 +210,46 @@ class ScriptGeneratorTab(ttk.Frame):
         try:
             workflow = self.factory.script_generator(library_path)
             result = workflow.generate(bvids, outline_path, requirements)
-            self.after(0, self._show_result, result)
+            self._ui_events.put(("result", result))
         except Exception as exc:
-            self.after(0, messagebox.showerror, "文案生成失败", str(exc))
+            self._ui_events.put(("error", "文案生成失败", str(exc)))
         finally:
-            self.after(0, self._set_busy, False, "就绪")
+            self._ui_events.put(("finished",))
+
+    def _schedule_event_poll(self) -> None:
+        if self._event_poll_scheduled:
+            return
+        self._event_poll_scheduled = True
+        self.after(50, self._drain_ui_events)
+
+    def _drain_ui_events(self) -> None:
+        self._event_poll_scheduled = False
+        while True:
+            try:
+                event = self._ui_events.get_nowait()
+            except queue.Empty:
+                break
+
+            event_type = event[0]
+            if event_type == "selected_cases":
+                self._show_selected_cases(event[1])
+            elif event_type == "result":
+                self._show_result(event[1])
+            elif event_type == "error":
+                messagebox.showerror(event[1], event[2])
+            elif event_type == "finished":
+                self._worker_active = False
+                self._set_busy(False, "就绪")
+
+        if self._worker_active or not self._ui_events.empty():
+            self._schedule_event_poll()
+
+    def _discard_pending_events(self) -> None:
+        while True:
+            try:
+                self._ui_events.get_nowait()
+            except queue.Empty:
+                break
 
     def _show_result(self, result: str) -> None:
         self.result_output.delete("1.0", tk.END)
@@ -220,6 +273,10 @@ class ScriptGeneratorTab(ttk.Frame):
         self.search_button.configure(state=tk.DISABLED if busy else tk.NORMAL)
         if busy:
             self.generate_button.configure(state=tk.DISABLED)
+            self.busy_indicator.start(12)
         elif self.selected_bvids.get("1.0", tk.END).strip():
             self.generate_button.configure(state=tk.NORMAL)
+            self.busy_indicator.stop()
+        else:
+            self.busy_indicator.stop()
 
