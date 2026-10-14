@@ -23,6 +23,8 @@ class CaseBuilderTab(ttk.Frame):
         self._worker_active = False
         self._event_poll_scheduled = False
         self._task_bvids: list[str] = []
+        self._task_signature: Optional[tuple] = None
+        self._resume_available = False
         self._create_widgets()
 
     def _create_widgets(self) -> None:
@@ -252,16 +254,41 @@ class CaseBuilderTab(ttk.Frame):
             messagebox.showwarning("缺少 BV 号", "请至少输入一个 BV 号。")
             return
 
+        cookies_from_browser = "chrome" if self.use_chrome_cookies.get() else None
+        task_signature = self._make_task_signature(
+            Path(path_text),
+            mode,
+            uids,
+            count,
+            bvids,
+            cookies_from_browser,
+        )
+        resume = (
+            self._resume_available
+            and bool(self._task_bvids)
+            and task_signature == self._task_signature
+        )
+
         self.stop_event.clear()
         self._discard_pending_events()
-        self._clear_log()
+        if not resume:
+            self._clear_log()
+            self._task_bvids = list(bvids)
+            self._task_signature = task_signature
+        self._resume_available = False
+        self.start_button.configure(text="开始构建")
         self.progress_value.set(0.0)
         self.progress_status.set("正在启动……")
-        self._task_bvids = list(bvids)
         self._reset_pipeline_progress()
         self._worker_active = True
         self._set_running(True)
-        self._append_log("开始执行案例库构建任务。")
+        if resume:
+            self._append_log(
+                f"继续上次构建，直接处理已获取的 "
+                f"{len(self._task_bvids)} 个 BV 号。"
+            )
+        else:
+            self._append_log("开始执行案例库构建任务。")
         self._append_log(f"本次使用 Whisper 模型：{WHISPER_MODEL}")
         self._schedule_event_poll()
         worker = threading.Thread(
@@ -271,12 +298,31 @@ class CaseBuilderTab(ttk.Frame):
                 mode,
                 uids,
                 count,
-                bvids,
-                "chrome" if self.use_chrome_cookies.get() else None,
+                list(self._task_bvids) if resume else bvids,
+                cookies_from_browser,
+                resume,
             ),
             daemon=True,
         )
         worker.start()
+
+    @staticmethod
+    def _make_task_signature(
+        library_path: Path,
+        mode: str,
+        uids: list[str],
+        count: int,
+        bvids: list[str],
+        cookies_from_browser: Optional[str],
+    ) -> tuple:
+        """Identify whether the current form still describes the stopped task."""
+        source = (tuple(uids), count) if mode == "uid" else tuple(bvids)
+        return (
+            str(library_path.expanduser().resolve()),
+            mode,
+            source,
+            cookies_from_browser if mode == "uid" else None,
+        )
 
     def _run_worker(
         self,
@@ -286,14 +332,20 @@ class CaseBuilderTab(ttk.Frame):
         count: int,
         bvids: list,
         cookies_from_browser: Optional[str],
+        resume: bool = False,
     ) -> None:
+        failed = False
         try:
             workflow = self.factory.case_builder(
                 library_path,
                 log=self._thread_log,
                 progress=self._thread_progress,
             )
-            if mode == "uid":
+            if resume:
+                # The UID discovery result is kept by the tab.  Resume the
+                # processing queue directly so Bilibili is not queried again.
+                workflow.run(bvids, should_stop=self.stop_event.is_set)
+            elif mode == "uid":
                 workflow.run_from_users(
                     uids,
                     count,
@@ -306,10 +358,11 @@ class CaseBuilderTab(ttk.Frame):
             if not self.stop_event.is_set():
                 self._thread_log("案例库构建完成。")
         except Exception as exc:
+            failed = True
             self._thread_log(f"任务失败：{exc}")
             self._ui_events.put(("error", str(exc)))
         finally:
-            self._ui_events.put(("finished",))
+            self._ui_events.put(("finished", self.stop_event.is_set(), failed))
 
     def _request_stop(self) -> None:
         self.stop_event.set()
@@ -389,6 +442,16 @@ class CaseBuilderTab(ttk.Frame):
             elif event_type == "finished":
                 self._worker_active = False
                 self._set_running(False)
+                stopped = bool(event[1]) if len(event) > 1 else False
+                failed = bool(event[2]) if len(event) > 2 else False
+                self._resume_available = stopped and not failed and bool(
+                    self._task_bvids
+                )
+                self.start_button.configure(
+                    text="继续构建" if self._resume_available else "开始构建"
+                )
+                if self._resume_available:
+                    terminal_status = "已停止，可继续构建"
 
         # Whisper and yt-dlp can emit many updates between two Tk refreshes.
         # Rendering only the newest value for each lane keeps the UI responsive

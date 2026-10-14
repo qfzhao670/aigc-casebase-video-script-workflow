@@ -633,6 +633,81 @@ class CaseBuilderProgressPresentationTests(unittest.TestCase):
         )
 
 
+class CaseBuilderContinuationTests(unittest.TestCase):
+    def test_stopped_task_exposes_continue_action(self):
+        tab = object.__new__(CaseBuilderTab)
+        tab._ui_events = queue.Queue()
+        tab._ui_events.put(("finished", True, False))
+        tab._event_poll_scheduled = True
+        tab._worker_active = True
+        tab._task_bvids = ["BV1xx411c7mD"]
+        tab._resume_available = False
+        tab._set_running = mock.Mock()
+        tab.start_button = mock.Mock()
+        tab.progress_status = mock.Mock()
+        tab._show_progress = mock.Mock()
+        tab._schedule_event_poll = mock.Mock()
+
+        tab._drain_ui_events()
+
+        self.assertTrue(tab._resume_available)
+        tab.start_button.configure.assert_called_once_with(text="继续构建")
+        tab.progress_status.set.assert_called_once_with("已停止，可继续构建")
+        tab._set_running.assert_called_once_with(False)
+        tab._schedule_event_poll.assert_not_called()
+
+    def test_resume_uses_cached_bvids_without_resolving_uid_again(self):
+        workflow = mock.Mock()
+        tab = object.__new__(CaseBuilderTab)
+        tab.factory = mock.Mock()
+        tab.factory.case_builder.return_value = workflow
+        tab.stop_event = threading.Event()
+        tab._ui_events = queue.Queue()
+        tab._thread_log = mock.Mock()
+        tab._thread_progress = mock.Mock()
+        tab._thread_bvids = mock.Mock()
+
+        tab._run_worker(
+            Path("cases.jsonl"),
+            "uid",
+            ["12345"],
+            10,
+            ["BV1xx411c7mD", "BV1YY411c7Ab"],
+            "chrome",
+            resume=True,
+        )
+
+        workflow.run.assert_called_once_with(
+            ["BV1xx411c7mD", "BV1YY411c7Ab"],
+            should_stop=tab.stop_event.is_set,
+        )
+        workflow.run_from_users.assert_not_called()
+        self.assertEqual(
+            tab._ui_events.get_nowait(),
+            ("finished", False, False),
+        )
+
+    def test_task_signature_changes_when_uid_settings_change(self):
+        original = CaseBuilderTab._make_task_signature(
+            Path("cases.jsonl"),
+            "uid",
+            ["12345"],
+            10,
+            [],
+            "chrome",
+        )
+        changed = CaseBuilderTab._make_task_signature(
+            Path("cases.jsonl"),
+            "uid",
+            ["12345"],
+            20,
+            [],
+            "chrome",
+        )
+
+        self.assertNotEqual(original, changed)
+
+
 if __name__ == "__main__":
     unittest.main()
 
