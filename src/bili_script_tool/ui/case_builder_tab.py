@@ -29,7 +29,7 @@ class CaseBuilderTab(ttk.Frame):
 
     def _create_widgets(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        self.rowconfigure(1, weight=1)
 
         settings_frame = ttk.LabelFrame(self, text="任务设置", padding=10)
         settings_frame.grid(row=0, column=0, sticky=tk.EW, pady=(0, 10))
@@ -73,19 +73,32 @@ class CaseBuilderTab(ttk.Frame):
         )
         self.manual_mode_button.pack(side=tk.LEFT, padx=(18, 0))
 
-        ttk.Label(settings_frame, text="UID 列表").grid(
-            row=3, column=0, sticky=tk.NW, padx=(0, 12), pady=(10, 0)
+        options_frame = ttk.Frame(settings_frame)
+        options_frame.grid(
+            row=3,
+            column=0,
+            columnspan=3,
+            sticky=tk.EW,
+            pady=(8, 0),
         )
-        self.uid_input = scrolledtext.ScrolledText(
-            settings_frame,
-            height=3,
-            wrap=tk.NONE,
-        )
-        self.uid_input.grid(row=3, column=1, sticky=tk.EW, pady=(10, 0))
+        options_frame.columnconfigure(0, weight=1, uniform="options")
+        options_frame.columnconfigure(1, weight=1, uniform="options")
 
-        count_frame = ttk.Frame(settings_frame)
-        count_frame.grid(row=3, column=2, sticky=tk.NW, padx=(12, 0), pady=(10, 0))
-        ttk.Label(count_frame, text="每个 UID 最近").grid(row=0, column=0, columnspan=2)
+        source_frame = ttk.LabelFrame(options_frame, text="UID 自动获取", padding=8)
+        source_frame.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 5))
+        source_frame.columnconfigure(0, weight=1)
+
+        source_header = ttk.Frame(source_frame)
+        source_header.grid(row=0, column=0, sticky=tk.EW, pady=(0, 5))
+        source_header.columnconfigure(0, weight=1)
+        ttk.Label(source_header, text="UID 列表（每行一个）").grid(
+            row=0,
+            column=0,
+            sticky=tk.W,
+        )
+        count_frame = ttk.Frame(source_header)
+        count_frame.grid(row=0, column=1, sticky=tk.E)
+        ttk.Label(count_frame, text="每个最近").pack(side=tk.LEFT)
         self.video_count = tk.StringVar(value="10")
         self.count_input = ttk.Spinbox(
             count_frame,
@@ -94,30 +107,37 @@ class CaseBuilderTab(ttk.Frame):
             textvariable=self.video_count,
             width=6,
         )
-        self.count_input.grid(row=1, column=0, pady=(5, 0))
-        ttk.Label(count_frame, text="条").grid(
-            row=1, column=1, sticky=tk.W, padx=(5, 0), pady=(5, 0)
+        self.count_input.pack(side=tk.LEFT, padx=(5, 3))
+        ttk.Label(count_frame, text="条").pack(side=tk.LEFT)
+
+        self.uid_input = scrolledtext.ScrolledText(
+            source_frame,
+            height=3,
+            wrap=tk.NONE,
         )
-        ttk.Label(settings_frame, text="每行一个纯数字 UID").grid(
-            row=4, column=1, sticky=tk.W, pady=(4, 0)
-        )
+        self.uid_input.grid(row=1, column=0, sticky=tk.EW)
         self.use_chrome_cookies = tk.BooleanVar(value=True)
         self.cookie_retry_button = ttk.Checkbutton(
-            settings_frame,
-            text="遇到 412/352 风控时，使用 Chrome 的 B 站登录状态重试",
+            source_frame,
+            text="遇到 412/352 风控时使用 Chrome 登录状态重试",
             variable=self.use_chrome_cookies,
         )
         self.cookie_retry_button.grid(
-            row=5, column=1, columnspan=2, sticky=tk.W, pady=(6, 0)
+            row=2, column=0, sticky=tk.W, pady=(5, 0)
         )
 
-        ttk.Label(settings_frame, text="视频时长").grid(
-            row=6, column=0, sticky=tk.W, padx=(0, 12), pady=(10, 0)
+        filter_frame = ttk.LabelFrame(options_frame, text="视频筛选", padding=8)
+        filter_frame.grid(row=0, column=1, sticky=tk.NSEW, padx=(5, 0))
+        filter_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(filter_frame, text="时长").grid(
+            row=0,
+            column=0,
+            sticky=tk.W,
+            padx=(0, 8),
         )
-        duration_frame = ttk.Frame(settings_frame)
-        duration_frame.grid(
-            row=6, column=1, columnspan=2, sticky=tk.W, pady=(10, 0)
-        )
+        duration_frame = ttk.Frame(filter_frame)
+        duration_frame.grid(row=0, column=1, sticky=tk.W)
         self.min_duration_minutes = tk.StringVar()
         self.min_duration_input = ttk.Entry(
             duration_frame,
@@ -133,36 +153,53 @@ class CaseBuilderTab(ttk.Frame):
             width=8,
         )
         self.max_duration_input.pack(side=tk.LEFT)
-        ttk.Label(duration_frame, text="分钟（最短 / 最长，留空不限）").pack(
+        ttk.Label(duration_frame, text="分钟（最短 / 最长）").pack(
             side=tk.LEFT,
             padx=(8, 0),
         )
 
-        ttk.Label(settings_frame, text="标题关键词").grid(
-            row=7, column=0, sticky=tk.W, padx=(0, 12), pady=(8, 0)
+        ttk.Label(filter_frame, text="标题").grid(
+            row=1,
+            column=0,
+            sticky=tk.W,
+            padx=(0, 8),
+            pady=(7, 0),
         )
         self.title_keywords_text = tk.StringVar()
         self.title_keywords_input = ttk.Entry(
-            settings_frame,
+            filter_frame,
             textvariable=self.title_keywords_text,
         )
         self.title_keywords_input.grid(
-            row=7, column=1, columnspan=2, sticky=tk.EW, pady=(8, 0)
+            row=1,
+            column=1,
+            sticky=tk.EW,
+            pady=(7, 0),
         )
         ttk.Label(
-            settings_frame,
-            text="多个关键词用逗号分隔；标题命中任意一个即保留，留空不限",
-        ).grid(row=8, column=1, columnspan=2, sticky=tk.W, pady=(4, 0))
+            filter_frame,
+            text="时长留空即不限；多个关键词用逗号分隔，命中任意一个即保留",
+            wraplength=350,
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(7, 0))
+
+        workspace_pane = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        workspace_pane.grid(row=1, column=0, sticky=tk.NSEW)
+
+        activity_frame = ttk.Frame(workspace_pane)
+        activity_frame.columnconfigure(0, weight=2, minsize=280)
+        activity_frame.columnconfigure(1, weight=3, minsize=420)
+        activity_frame.rowconfigure(0, weight=1)
 
         input_frame = ttk.LabelFrame(
-            self,
+            activity_frame,
             text="BV 号列表 · 每行一个（UID 模式下自动填入）",
             padding=10,
         )
-        input_frame.grid(row=1, column=0, sticky=tk.EW, pady=(0, 10))
+        input_frame.grid(row=0, column=0, sticky=tk.NSEW, padx=(0, 5))
         input_frame.columnconfigure(0, weight=1)
-        self.bvid_input = scrolledtext.ScrolledText(input_frame, height=6, wrap=tk.NONE)
-        self.bvid_input.grid(row=0, column=0, sticky=tk.EW)
+        input_frame.rowconfigure(0, weight=1)
+        self.bvid_input = scrolledtext.ScrolledText(input_frame, height=8, wrap=tk.NONE)
+        self.bvid_input.grid(row=0, column=0, sticky=tk.NSEW)
 
         button_frame = ttk.Frame(input_frame)
         button_frame.grid(row=1, column=0, sticky=tk.EW, pady=(8, 0))
@@ -178,9 +215,10 @@ class CaseBuilderTab(ttk.Frame):
         )
         self.start_button.pack(side=tk.RIGHT, padx=(0, 6))
 
-        progress_frame = ttk.LabelFrame(self, text="任务进度", padding=10)
-        progress_frame.grid(row=2, column=0, sticky=tk.EW, pady=(0, 10))
+        progress_frame = ttk.LabelFrame(activity_frame, text="任务进度", padding=10)
+        progress_frame.grid(row=0, column=1, sticky=tk.NSEW, padx=(5, 0))
         progress_frame.columnconfigure(1, weight=1)
+        progress_frame.columnconfigure(2, weight=1)
         self.progress_status = tk.StringVar(value="就绪")
         ttk.Label(progress_frame, textvariable=self.progress_status).grid(
             row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 6)
@@ -221,23 +259,22 @@ class CaseBuilderTab(ttk.Frame):
             ttk.Label(
                 progress_frame,
                 textvariable=status,
-                width=34,
+                width=18,
                 anchor=tk.W,
-            ).grid(row=row, column=2, sticky=tk.W, pady=2)
+            ).grid(row=row, column=2, sticky=tk.EW, pady=2)
             self.pipeline_value[lane] = value
             self.pipeline_status[lane] = status
 
         log_frame = ttk.LabelFrame(
-            self,
-            text="事件日志 · 实时百分比见上方",
+            workspace_pane,
+            text="事件日志 · 可拖动上方分隔线调整高度",
             padding=10,
         )
-        log_frame.grid(row=3, column=0, sticky=tk.NSEW)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_output = scrolledtext.ScrolledText(
             log_frame,
-            height=10,
+            height=14,
             state=tk.DISABLED,
             wrap=tk.WORD,
         )
@@ -250,6 +287,9 @@ class CaseBuilderTab(ttk.Frame):
         self.log_output.tag_configure("success", foreground="#18794e")
         self.log_output.tag_configure("warning", foreground="#9a6700")
         self.log_output.tag_configure("error", foreground="#cf222e")
+
+        workspace_pane.add(activity_frame, weight=1)
+        workspace_pane.add(log_frame, weight=4)
         self._update_source_controls()
 
     def _browse_library(self) -> None:
