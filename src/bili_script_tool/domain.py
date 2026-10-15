@@ -1,7 +1,7 @@
 """Domain models shared by storage, workflows, and the user interface."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Optional
 
 from .errors import DataValidationError
 
@@ -11,6 +11,7 @@ class VideoMetadata:
     uploader: str
     bvid: str
     title: str
+    duration: Optional[float] = None
 
 
 @dataclass(frozen=True)

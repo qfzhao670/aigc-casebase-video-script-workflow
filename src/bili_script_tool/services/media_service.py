@@ -5,6 +5,7 @@ from contextlib import redirect_stderr
 import importlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 import platform
 import re
@@ -263,10 +264,17 @@ class MediaService:
             raise ExternalCommandError("yt-dlp 返回了无法解析的视频信息") from exc
 
         resolved_bvid = str(value.get("id", bvid)).strip() or bvid
+        try:
+            duration = float(value["duration"])
+            if not math.isfinite(duration) or duration < 0:
+                duration = None
+        except (KeyError, TypeError, ValueError):
+            duration = None
         return VideoMetadata(
             uploader=str(value.get("uploader", "Unknown")).strip() or "Unknown",
             bvid=resolved_bvid,
             title=str(value.get("title", "Untitled")).strip() or "Untitled",
+            duration=duration,
         )
 
     def download_audio(

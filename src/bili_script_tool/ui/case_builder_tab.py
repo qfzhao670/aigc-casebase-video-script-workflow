@@ -111,6 +111,49 @@ class CaseBuilderTab(ttk.Frame):
             row=5, column=1, columnspan=2, sticky=tk.W, pady=(6, 0)
         )
 
+        ttk.Label(settings_frame, text="视频时长").grid(
+            row=6, column=0, sticky=tk.W, padx=(0, 12), pady=(10, 0)
+        )
+        duration_frame = ttk.Frame(settings_frame)
+        duration_frame.grid(
+            row=6, column=1, columnspan=2, sticky=tk.W, pady=(10, 0)
+        )
+        self.min_duration_minutes = tk.StringVar()
+        self.min_duration_input = ttk.Entry(
+            duration_frame,
+            textvariable=self.min_duration_minutes,
+            width=8,
+        )
+        self.min_duration_input.pack(side=tk.LEFT)
+        ttk.Label(duration_frame, text="–").pack(side=tk.LEFT, padx=6)
+        self.max_duration_minutes = tk.StringVar()
+        self.max_duration_input = ttk.Entry(
+            duration_frame,
+            textvariable=self.max_duration_minutes,
+            width=8,
+        )
+        self.max_duration_input.pack(side=tk.LEFT)
+        ttk.Label(duration_frame, text="分钟（最短 / 最长，留空不限）").pack(
+            side=tk.LEFT,
+            padx=(8, 0),
+        )
+
+        ttk.Label(settings_frame, text="标题关键词").grid(
+            row=7, column=0, sticky=tk.W, padx=(0, 12), pady=(8, 0)
+        )
+        self.title_keywords_text = tk.StringVar()
+        self.title_keywords_input = ttk.Entry(
+            settings_frame,
+            textvariable=self.title_keywords_text,
+        )
+        self.title_keywords_input.grid(
+            row=7, column=1, columnspan=2, sticky=tk.EW, pady=(8, 0)
+        )
+        ttk.Label(
+            settings_frame,
+            text="多个关键词用逗号分隔；标题命中任意一个即保留，留空不限",
+        ).grid(row=8, column=1, columnspan=2, sticky=tk.W, pady=(4, 0))
+
         input_frame = ttk.LabelFrame(
             self,
             text="BV 号列表 · 每行一个（UID 模式下自动填入）",
@@ -254,6 +297,30 @@ class CaseBuilderTab(ttk.Frame):
             messagebox.showwarning("缺少 BV 号", "请至少输入一个 BV 号。")
             return
 
+        try:
+            min_duration_seconds = self._parse_duration_minutes(
+                self.min_duration_minutes.get(),
+                "最短时长",
+            )
+            max_duration_seconds = self._parse_duration_minutes(
+                self.max_duration_minutes.get(),
+                "最长时长",
+            )
+        except ValueError as exc:
+            messagebox.showwarning("无效筛选条件", str(exc))
+            return
+        if (
+            min_duration_seconds is not None
+            and max_duration_seconds is not None
+            and min_duration_seconds > max_duration_seconds
+        ):
+            messagebox.showwarning(
+                "无效筛选条件",
+                "最短时长不能大于最长时长。",
+            )
+            return
+        title_keywords = self._parse_title_keywords(self.title_keywords_text.get())
+
         cookies_from_browser = "chrome" if self.use_chrome_cookies.get() else None
         task_signature = self._make_task_signature(
             Path(path_text),
@@ -262,6 +329,9 @@ class CaseBuilderTab(ttk.Frame):
             count,
             bvids,
             cookies_from_browser,
+            min_duration_seconds,
+            max_duration_seconds,
+            title_keywords,
         )
         resume = (
             self._resume_available
@@ -300,6 +370,9 @@ class CaseBuilderTab(ttk.Frame):
                 count,
                 list(self._task_bvids) if resume else bvids,
                 cookies_from_browser,
+                min_duration_seconds,
+                max_duration_seconds,
+                title_keywords,
                 resume,
             ),
             daemon=True,
@@ -314,6 +387,9 @@ class CaseBuilderTab(ttk.Frame):
         count: int,
         bvids: list[str],
         cookies_from_browser: Optional[str],
+        min_duration_seconds: Optional[float] = None,
+        max_duration_seconds: Optional[float] = None,
+        title_keywords: tuple[str, ...] = (),
     ) -> tuple:
         """Identify whether the current form still describes the stopped task."""
         source = (tuple(uids), count) if mode == "uid" else tuple(bvids)
@@ -322,7 +398,37 @@ class CaseBuilderTab(ttk.Frame):
             mode,
             source,
             cookies_from_browser if mode == "uid" else None,
+            min_duration_seconds,
+            max_duration_seconds,
+            tuple(title_keywords),
         )
+
+    @staticmethod
+    def _parse_duration_minutes(value: str, label: str) -> Optional[float]:
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            minutes = float(text)
+        except ValueError as exc:
+            raise ValueError(f"{label}必须是数字，或留空表示不限。") from exc
+        if minutes != minutes or minutes in {float("inf"), float("-inf")}:
+            raise ValueError(f"{label}必须是有限数字。")
+        if minutes < 0:
+            raise ValueError(f"{label}不能小于 0。")
+        return minutes * 60
+
+    @staticmethod
+    def _parse_title_keywords(value: str) -> tuple[str, ...]:
+        keywords = []
+        seen = set()
+        for item in re.split(r"[,\uff0c\n]+", value):
+            keyword = item.strip()
+            normalized = keyword.casefold()
+            if keyword and normalized not in seen:
+                keywords.append(keyword)
+                seen.add(normalized)
+        return tuple(keywords)
 
     def _run_worker(
         self,
@@ -332,6 +438,9 @@ class CaseBuilderTab(ttk.Frame):
         count: int,
         bvids: list,
         cookies_from_browser: Optional[str],
+        min_duration_seconds: Optional[float] = None,
+        max_duration_seconds: Optional[float] = None,
+        title_keywords: tuple[str, ...] = (),
         resume: bool = False,
     ) -> None:
         failed = False
@@ -344,7 +453,13 @@ class CaseBuilderTab(ttk.Frame):
             if resume:
                 # The UID discovery result is kept by the tab.  Resume the
                 # processing queue directly so Bilibili is not queried again.
-                workflow.run(bvids, should_stop=self.stop_event.is_set)
+                workflow.run(
+                    bvids,
+                    should_stop=self.stop_event.is_set,
+                    min_duration_seconds=min_duration_seconds,
+                    max_duration_seconds=max_duration_seconds,
+                    title_keywords=title_keywords,
+                )
             elif mode == "uid":
                 workflow.run_from_users(
                     uids,
@@ -352,9 +467,18 @@ class CaseBuilderTab(ttk.Frame):
                     should_stop=self.stop_event.is_set,
                     on_bvids=self._thread_bvids,
                     cookies_from_browser=cookies_from_browser,
+                    min_duration_seconds=min_duration_seconds,
+                    max_duration_seconds=max_duration_seconds,
+                    title_keywords=title_keywords,
                 )
             else:
-                workflow.run(bvids, should_stop=self.stop_event.is_set)
+                workflow.run(
+                    bvids,
+                    should_stop=self.stop_event.is_set,
+                    min_duration_seconds=min_duration_seconds,
+                    max_duration_seconds=max_duration_seconds,
+                    title_keywords=title_keywords,
+                )
             if not self.stop_event.is_set():
                 self._thread_log("案例库构建完成。")
         except Exception as exc:
@@ -379,6 +503,9 @@ class CaseBuilderTab(ttk.Frame):
             self.uid_input.configure(state=tk.DISABLED)
             self.count_input.configure(state=tk.DISABLED)
             self.cookie_retry_button.configure(state=tk.DISABLED)
+            self.min_duration_input.configure(state=tk.DISABLED)
+            self.max_duration_input.configure(state=tk.DISABLED)
+            self.title_keywords_input.configure(state=tk.DISABLED)
             self.bvid_input.configure(state=tk.DISABLED)
         else:
             self._update_source_controls()
@@ -388,6 +515,9 @@ class CaseBuilderTab(ttk.Frame):
         self.uid_input.configure(state=tk.NORMAL if uid_mode else tk.DISABLED)
         self.count_input.configure(state=tk.NORMAL if uid_mode else tk.DISABLED)
         self.cookie_retry_button.configure(state=tk.NORMAL if uid_mode else tk.DISABLED)
+        self.min_duration_input.configure(state=tk.NORMAL)
+        self.max_duration_input.configure(state=tk.NORMAL)
+        self.title_keywords_input.configure(state=tk.NORMAL)
         self.bvid_input.configure(state=tk.DISABLED if uid_mode else tk.NORMAL)
 
     def _thread_log(self, message: str) -> None:
@@ -498,7 +628,12 @@ class CaseBuilderTab(ttk.Frame):
     def _progress_lane(stage: str) -> Optional[str]:
         if any(
             marker in stage
-            for marker in ("读取视频信息", "下载音频", "视频信息读取完成")
+            for marker in (
+                "读取视频信息",
+                "下载音频",
+                "视频信息读取完成",
+                "筛选条件",
+            )
         ):
             return "download"
         if "语音转录" in stage:
@@ -595,7 +730,7 @@ class CaseBuilderTab(ttk.Frame):
     def _log_lane(message: str) -> tuple[str, str]:
         if any(
             marker in message
-            for marker in ("预取视频", "下载音频", "音频已存在")
+            for marker in ("预取视频", "下载音频", "音频已存在", "筛选跳过")
         ):
             return "下载", "download"
         if any(

@@ -346,6 +346,33 @@ class MediaProgressTests(unittest.TestCase):
         with self.assertRaises(DataValidationError):
             service.get_user_bvids("123", 0)
 
+    def test_get_metadata_includes_duration(self):
+        service = object.__new__(MediaService)
+        service._run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=json.dumps(
+                    {
+                        "id": "BV1xx411c7mD",
+                        "uploader": "tester",
+                        "title": "AI 案例",
+                        "duration": 615.5,
+                    }
+                ),
+                stderr="",
+            )
+        )
+
+        with mock.patch(
+            "bili_script_tool.services.media_service.require_executable",
+            return_value="/usr/bin/yt-dlp",
+        ):
+            metadata = service.get_metadata("BV1xx411c7mD")
+
+        self.assertEqual(metadata.title, "AI 案例")
+        self.assertEqual(metadata.duration, 615.5)
+
     def test_get_user_bvids_retries_risk_errors_with_browser_cookies(self):
         errors = {
             "412": "Request is blocked by server (412)",
@@ -592,6 +619,66 @@ class CaseBuildProgressTests(unittest.TestCase):
         )
         self.assertEqual(resolved, result)
 
+    def test_filters_before_download_by_title_and_duration(self):
+        class Repository:
+            def __init__(self):
+                self.records = []
+
+            def existing_bvids(self):
+                return set()
+
+            def append(self, record):
+                self.records.append(record)
+
+        class Media:
+            def __init__(self):
+                self.downloaded = []
+
+            def check_dependencies(self):
+                pass
+
+            def get_metadata(self, bvid):
+                return {
+                    "BV1": VideoMetadata("uploader", bvid, "AI 入门", 600),
+                    "BV2": VideoMetadata("uploader", bvid, "AI 短片", 599),
+                    "BV3": VideoMetadata("uploader", bvid, "科技分享", 900),
+                    "BV4": VideoMetadata("uploader", bvid, "AI 时长未知", None),
+                    "BV5": VideoMetadata("uploader", bvid, "ai 进阶", 1200),
+                    "BV6": VideoMetadata("uploader", bvid, "美食分享", 900),
+                }[bvid]
+
+            def download_audio(self, metadata, progress=None):
+                self.downloaded.append(metadata.bvid)
+                progress(100.0)
+                return Path(f"{metadata.bvid}.wav")
+
+            def transcribe(self, audio_path, progress=None):
+                progress(100.0)
+                return "transcript"
+
+        class AI:
+            def analyze_transcript(self, transcript):
+                return CaseAnalysis("summary", ["keyword"])
+
+        repository = Repository()
+        media = Media()
+        logs = []
+        workflow = CaseBuildWorkflow(repository, media, AI(), log=logs.append)
+
+        workflow.run(
+            ["BV1", "BV2", "BV3", "BV4", "BV5", "BV6"],
+            min_duration_seconds=600,
+            max_duration_seconds=1200,
+            title_keywords=["AI", "科技"],
+        )
+
+        self.assertEqual(media.downloaded, ["BV1", "BV3", "BV5"])
+        self.assertEqual(
+            [record.bvid for record in repository.records],
+            ["BV1", "BV3", "BV5"],
+        )
+        self.assertEqual(sum("筛选跳过" in message for message in logs), 3)
+
 
 class CaseBuilderProgressPresentationTests(unittest.TestCase):
     def test_routes_concurrent_stages_to_separate_lanes(self):
@@ -607,6 +694,23 @@ class CaseBuilderProgressPresentationTests(unittest.TestCase):
             CaseBuilderTab._progress_lane("[1/5] 正在写入案例库……"),
             "analysis",
         )
+        self.assertEqual(
+            CaseBuilderTab._progress_lane("[3/5] 不符合筛选条件，已跳过"),
+            "download",
+        )
+
+    def test_parses_optional_duration_and_title_keywords(self):
+        self.assertIsNone(CaseBuilderTab._parse_duration_minutes("  ", "最短时长"))
+        self.assertEqual(
+            CaseBuilderTab._parse_duration_minutes("1.5", "最短时长"),
+            90.0,
+        )
+        self.assertEqual(
+            CaseBuilderTab._parse_title_keywords(" AI，科技,ai "),
+            ("AI", "科技"),
+        )
+        with self.assertRaises(ValueError):
+            CaseBuilderTab._parse_duration_minutes("-1", "最短时长")
 
     def test_lane_status_includes_the_corresponding_bvid(self):
         tab = object.__new__(CaseBuilderTab)
@@ -674,12 +778,18 @@ class CaseBuilderContinuationTests(unittest.TestCase):
             10,
             ["BV1xx411c7mD", "BV1YY411c7Ab"],
             "chrome",
+            60.0,
+            600.0,
+            ("AI",),
             resume=True,
         )
 
         workflow.run.assert_called_once_with(
             ["BV1xx411c7mD", "BV1YY411c7Ab"],
             should_stop=tab.stop_event.is_set,
+            min_duration_seconds=60.0,
+            max_duration_seconds=600.0,
+            title_keywords=("AI",),
         )
         workflow.run_from_users.assert_not_called()
         self.assertEqual(
@@ -703,6 +813,32 @@ class CaseBuilderContinuationTests(unittest.TestCase):
             20,
             [],
             "chrome",
+        )
+
+        self.assertNotEqual(original, changed)
+
+    def test_task_signature_changes_when_filters_change(self):
+        original = CaseBuilderTab._make_task_signature(
+            Path("cases.jsonl"),
+            "uid",
+            ["12345"],
+            10,
+            [],
+            "chrome",
+            60.0,
+            600.0,
+            ("AI",),
+        )
+        changed = CaseBuilderTab._make_task_signature(
+            Path("cases.jsonl"),
+            "uid",
+            ["12345"],
+            10,
+            [],
+            "chrome",
+            60.0,
+            600.0,
+            ("美食",),
         )
 
         self.assertNotEqual(original, changed)

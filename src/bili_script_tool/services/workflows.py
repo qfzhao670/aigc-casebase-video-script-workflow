@@ -2,6 +2,7 @@
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+import math
 from pathlib import Path
 import threading
 from typing import Callable, Iterable, List, Optional
@@ -17,6 +18,59 @@ LogCallback = Callable[[str], None]
 StopCallback = Callable[[], bool]
 ProgressCallback = Callable[[str, float, Optional[float]], None]
 BvidsCallback = Callable[[List[str]], None]
+
+
+def _normalize_title_keywords(keywords: Iterable[str]) -> tuple[str, ...]:
+    """Normalize and deduplicate literal title keywords."""
+    normalized = []
+    seen = set()
+    for keyword in keywords:
+        value = str(keyword).strip().casefold()
+        if value and value not in seen:
+            normalized.append(value)
+            seen.add(value)
+    return tuple(normalized)
+
+
+def _validate_duration_range(
+    min_duration_seconds: Optional[float],
+    max_duration_seconds: Optional[float],
+) -> None:
+    for label, value in (
+        ("最短时长", min_duration_seconds),
+        ("最长时长", max_duration_seconds),
+    ):
+        if value is not None and (not math.isfinite(value) or value < 0):
+            raise DataValidationError(f"{label}必须是大于等于 0 的有限数字。")
+    if (
+        min_duration_seconds is not None
+        and max_duration_seconds is not None
+        and min_duration_seconds > max_duration_seconds
+    ):
+        raise DataValidationError("最短时长不能大于最长时长。")
+
+
+def _video_filter_reason(
+    metadata: VideoMetadata,
+    min_duration_seconds: Optional[float],
+    max_duration_seconds: Optional[float],
+    title_keywords: tuple[str, ...],
+) -> Optional[str]:
+    """Return the reason a video should be skipped, or ``None`` to keep it."""
+    if title_keywords and not any(
+        keyword in metadata.title.casefold() for keyword in title_keywords
+    ):
+        return "标题未包含指定关键词"
+
+    if min_duration_seconds is None and max_duration_seconds is None:
+        return None
+    if metadata.duration is None:
+        return "无法获取视频时长"
+    if min_duration_seconds is not None and metadata.duration < min_duration_seconds:
+        return f"时长 {metadata.duration / 60:.1f} 分钟，低于下限"
+    if max_duration_seconds is not None and metadata.duration > max_duration_seconds:
+        return f"时长 {metadata.duration / 60:.1f} 分钟，超过上限"
+    return None
 
 
 @dataclass(frozen=True)
@@ -91,6 +145,9 @@ class CaseBuildWorkflow:
         should_stop: Optional[StopCallback] = None,
         on_bvids: Optional[BvidsCallback] = None,
         cookies_from_browser: Optional[str] = None,
+        min_duration_seconds: Optional[float] = None,
+        max_duration_seconds: Optional[float] = None,
+        title_keywords: Iterable[str] = (),
     ) -> List[str]:
         """Resolve one user's recent videos, then pass them to the build flow."""
         return self.run_from_users(
@@ -99,6 +156,9 @@ class CaseBuildWorkflow:
             should_stop=should_stop,
             on_bvids=on_bvids,
             cookies_from_browser=cookies_from_browser,
+            min_duration_seconds=min_duration_seconds,
+            max_duration_seconds=max_duration_seconds,
+            title_keywords=title_keywords,
         )
 
     def run_from_users(
@@ -108,8 +168,12 @@ class CaseBuildWorkflow:
         should_stop: Optional[StopCallback] = None,
         on_bvids: Optional[BvidsCallback] = None,
         cookies_from_browser: Optional[str] = None,
+        min_duration_seconds: Optional[float] = None,
+        max_duration_seconds: Optional[float] = None,
+        title_keywords: Iterable[str] = (),
     ) -> List[str]:
         """Resolve multiple users' videos, merge them, then run the build flow."""
+        _validate_duration_range(min_duration_seconds, max_duration_seconds)
         stop_requested = should_stop or (lambda: False)
         normalized_uids = list(
             dict.fromkeys(str(uid).strip() for uid in uids if str(uid).strip())
@@ -171,11 +235,26 @@ class CaseBuildWorkflow:
             self.log("任务已停止。")
             self.progress("任务已停止", 0.0, None)
             return bvids
-        self.run(bvids, should_stop=stop_requested)
+        self.run(
+            bvids,
+            should_stop=stop_requested,
+            min_duration_seconds=min_duration_seconds,
+            max_duration_seconds=max_duration_seconds,
+            title_keywords=title_keywords,
+        )
         return bvids
 
-    def run(self, bvids: Iterable[str], should_stop: Optional[StopCallback] = None) -> None:
+    def run(
+        self,
+        bvids: Iterable[str],
+        should_stop: Optional[StopCallback] = None,
+        min_duration_seconds: Optional[float] = None,
+        max_duration_seconds: Optional[float] = None,
+        title_keywords: Iterable[str] = (),
+    ) -> None:
         stop_requested = should_stop or (lambda: False)
+        _validate_duration_range(min_duration_seconds, max_duration_seconds)
+        normalized_keywords = _normalize_title_keywords(title_keywords)
         normalized_ids = list(dict.fromkeys(item.strip() for item in bvids if item.strip()))
         total = len(normalized_ids)
         if total == 0:
@@ -203,11 +282,24 @@ class CaseBuildWorkflow:
             self.progress("案例库构建完成", 100.0, 100.0)
             return
 
-        def prepare(index: int, bvid: str) -> _PreparedVideo:
+        def prepare(index: int, bvid: str) -> Optional[_PreparedVideo]:
             self.log(f"[{index}/{total}] 正在预取视频：{bvid}")
             tracker.report(index, "正在读取视频信息……", 0.0, None)
             metadata = self.media.get_metadata(bvid)
             tracker.report(index, "视频信息读取完成", 5.0, 100.0)
+            filter_reason = _video_filter_reason(
+                metadata,
+                min_duration_seconds,
+                max_duration_seconds,
+                normalized_keywords,
+            )
+            if filter_reason is not None:
+                self.log(
+                    f"[{index}/{total}] 筛选跳过 {metadata.bvid}："
+                    f"{filter_reason}（{metadata.title}）"
+                )
+                tracker.report(index, "不符合筛选条件，已跳过", 100.0, 100.0)
+                return None
             audio_path = self.media.download_audio(
                 metadata,
                 progress=lambda percent: tracker.report(
@@ -273,10 +365,9 @@ class CaseBuildWorkflow:
             max_workers=1,
             thread_name_prefix="bili-analysis",
         )
-        current_download: Optional[Future[_PreparedVideo]] = download_executor.submit(
-            prepare,
-            *jobs[0],
-        )
+        current_download: Optional[
+            Future[Optional[_PreparedVideo]]
+        ] = download_executor.submit(prepare, *jobs[0])
 
         try:
             for position, (index, bvid) in enumerate(jobs):
